@@ -44,7 +44,7 @@ services:
     image: ghcr.io/oliver-poulter/valheimmonitor:latest
     container_name: valheim-watchtower
     ports:
-      - "${DASHBOARD_PORT:-3000}:3000"
+      - "${DASHBOARD_PORT:-3004}:3000"
     volumes:
       # Mount Docker socket to control valheim-server, run supervisorctl, and stream logs/stats
       - /var/run/docker.sock:/var/run/docker.sock

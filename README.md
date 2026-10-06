@@ -18,7 +18,7 @@ Add this `valheim-watchtower` service block directly to your existing Valheim **
     image: ghcr.io/oliver-poulter/valheimmonitor:latest
     container_name: valheim-watchtower
     ports:
-      - "3000:3000"
+      - "3004:3000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /path/to/your/valheim/config:/config
