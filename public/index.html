@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Heimdall Watchtower — Valheim Dedicated Server Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="bg-aurora"></div>
+  <div class="bg-runes"></div>
+
+  <!-- Top Header / Server Control Bar -->
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="brand-emblem" title="Heimdall Watchtower">
+        <svg viewBox="0 0 40 40" fill="none" class="rune-svg">
+          <path d="M20 3L35 11.5V28.5L20 37L5 28.5V11.5L20 3Z" stroke="currentColor" stroke-width="2" fill="rgba(245, 158, 11, 0.08)"/>
+          <path d="M20 8V32M20 14L28 9M20 20L28 15M20 20L12 15M20 26L14 30M20 26L26 30" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand-title-row">
+          <h1 class="brand-title" id="headerServerName">Valhalla Dedicated</h1>
+          <span class="status-pill status-running" id="serverStatusBadge">
+            <span class="pulse-dot"></span>
+            <span id="serverStatusText">ONLINE</span>
+          </span>
+          <span class="mode-badge" id="connectionModeBadge" title="Container connection mode">Docker Socket</span>
+        </div>
+        <div class="brand-meta-row">
+          <span class="meta-item">🌍 World: <strong id="headerWorldName">Midgard</strong></span>
+          <span class="meta-sep">•</span>
+          <span class="meta-item">⚡ Version: <strong id="headerVersion">0.219.16</strong></span>
+          <span class="meta-sep">•</span>
+          <span class="meta-item">⏱️ <span id="headerUptime">Up 4d 11h</span></span>
+          <span class="meta-sep">•</span>
+          <button class="join-code-chip" id="copyJoinCodeBtn" title="Click to copy PlayFab Crossplay Join Code">
+            <span>🔑 Join Code:</span>
+            <code id="headerJoinCode">849201</code>
+            <span class="copy-hint">Copy</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <button class="btn btn-emerald" id="btnStartServer" onclick="triggerServerAction('start')" title="Start Valheim Server">
+        <span>▶</span> Start
+      </button>
+      <button class="btn btn-amber" id="btnRestartServer" onclick="triggerServerAction('restart')" title="Gracefully save world & restart valheim-server via supervisorctl">
+        <span>↻</span> Restart
+      </button>
+      <button class="btn btn-crimson" id="btnStopServer" onclick="triggerServerAction('stop')" title="Gracefully save world & stop valheim-server">
+        <span>■</span> Stop
+      </button>
+      <div class="action-divider"></div>
+      <button class="btn btn-frost" onclick="triggerQuickSave()" title="Save world immediately">
+        <span>💾</span> Save World
+      </button>
+      <button class="btn btn-glass" onclick="triggerServerAction('backup')" title="Run supervisorctl start valheim-backup">
+        <span>🛡️</span> Backup Now
+      </button>
+      <button class="btn btn-glass" onclick="triggerServerAction('update')" title="Run supervisorctl start valheim-updater">
+        <span>⬇️</span> Check Update
+      </button>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <nav class="nav-tabs">
+    <button class="nav-tab active" data-tab="overview" onclick="switchTab('overview')">
+      <span class="tab-icon">👁️</span> Watchtower Overview
+    </button>
+    <button class="nav-tab" data-tab="map" onclick="switchTab('map')">
+      <span class="tab-icon">🗺️</span> Live World Map & Health
+      <span class="tab-counter" id="navMapLiveBadge">LIVE</span>
+    </button>
+    <button class="nav-tab" data-tab="players" onclick="switchTab('players')">
+      <span class="tab-icon">⚔️</span> Viking Roster & Stats
+      <span class="tab-counter" id="navOnlineCounter">3</span>
+    </button>
+    <button class="nav-tab" data-tab="commands" onclick="switchTab('commands')">
+      <span class="tab-icon">⚡</span> Command Deck & Raids
+    </button>
+    <button class="nav-tab" data-tab="acl" onclick="switchTab('acl')">
+      <span class="tab-icon">📜</span> Access Lists (ACL)
+    </button>
+    <button class="nav-tab" data-tab="backups" onclick="switchTab('backups')">
+      <span class="tab-icon">🏛️</span> Backup Vault & Worlds
+      <span class="tab-counter secondary" id="navBackupCounter">1</span>
+    </button>
+    <button class="nav-tab" data-tab="logs" onclick="switchTab('logs')">
+      <span class="tab-icon">📡</span> Live Server Logs
+    </button>
+    <button class="nav-tab" data-tab="settings" onclick="switchTab('settings')">
+      <span class="tab-icon">⚙️</span> Modifiers, Config & Discord
+    </button>
+  </nav>
+
+  <!-- Main Workspace -->
+  <main class="main-container">
+
+    <!-- ==================== TAB 1: OVERVIEW ==================== -->
+    <section class="tab-panel active" id="tab-overview">
+      <!-- KPI Stat Cards -->
+      <div class="kpi-grid">
+        <div class="kpi-card kpi-gold">
+          <div class="kpi-header">
+            <span class="kpi-label">ONLINE VIKINGS</span>
+            <span class="kpi-icon">⛵</span>
+          </div>
+          <div class="kpi-value-row">
+            <span class="kpi-value" id="kpiOnlineCount">3</span>
+            <span class="kpi-subvalue">/ 10 slots</span>
+          </div>
+          <div class="kpi-footer" id="kpiOnlineNames">Ragnar, Lagertha, Bjorn</div>
+        </div>
+
+        <div class="kpi-card kpi-frost">
+          <div class="kpi-header">
+            <span class="kpi-label">KNOWN VIKINGS & SESSIONS</span>
+            <span class="kpi-icon">🛡️</span>
+          </div>
+          <div class="kpi-value-row">
+            <span class="kpi-value" id="kpiTotalVikings">6</span>
+            <span class="kpi-subvalue" id="kpiTotalSessions">151 sessions</span>
+          </div>
+          <div class="kpi-footer" id="kpiLastLoginSummary">Last login: Bjorn (28m ago)</div>
+        </div>
+
+        <div class="kpi-card kpi-emerald">
+          <div class="kpi-header">
+            <span class="kpi-label">WORLD ZDO ENTITIES & SAVE</span>
+            <span class="kpi-icon">🌲</span>
+          </div>
+          <div class="kpi-value-row">
+            <span class="kpi-value" id="kpiZdoCount">154,820</span>
+            <span class="kpi-subvalue" id="kpiSaveMs">42.6 ms</span>
+          </div>
+          <div class="kpi-footer" id="kpiLastSaveTime">Last world save: 7m ago</div>
+        </div>
+
+        <div class="kpi-card kpi-crimson">
+          <div class="kpi-header">
+            <span class="kpi-label">CONTAINER LOAD & FALLEN</span>
+            <span class="kpi-icon">💀</span>
+          </div>
+          <div class="kpi-value-row">
+            <span class="kpi-value" id="kpiCpuRam">18% / 3.4 GB</span>
+            <span class="kpi-subvalue" id="kpiTotalDeaths">58 deaths</span>
+          </div>
+          <div class="kpi-footer" id="kpiNetworkIo">Net RX: 418 MB • TX: 295 MB</div>
+        </div>
+      </div>
+
+      <!-- Main Overview 2-Column Grid -->
+      <div class="overview-grid">
+        <!-- Left Column: Currently Logged In + Quick Broadcast/Command + Telemetry -->
+        <div class="overview-col">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">🔥 Active Vikings in Midgard</h2>
+                <p class="panel-subtitle">Real-time session tracking via ZDOID & SteamID64 handshake logs</p>
+              </div>
+              <div class="panel-actions">
+                <button class="btn btn-xs btn-glass" onclick="simulateLiveEvent('join')" title="Test live join log detection">
+                  + Simulate Join
+                </button>
+                <button class="btn btn-xs btn-glass" onclick="simulateLiveEvent('death')" title="Test live ZDOID 0:0 death detection">
+                  💀 Simulate Death
+                </button>
+                <button class="btn btn-xs btn-glass" onclick="simulateLiveEvent('raid')" title="Test live raid event detection">
+                  ⚔️ Simulate Raid
+                </button>
+              </div>
+            </div>
+            <div id="activePlayersContainer" class="active-players-list"></div>
+          </div>
+
+          <!-- Telemetry & World Save Charts -->
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">📈 Server Telemetry & World Save Latency</h2>
+                <p class="panel-subtitle">Docker Engine stats & Valheim ZDO world serialization time (ms)</p>
+              </div>
+              <span class="mono-badge" id="supervisorSummaryBadge">4/4 Supervisor Jobs Healthy</span>
+            </div>
+            <div class="charts-row">
+              <div class="chart-box">
+                <div class="chart-title-row">
+                  <span>CPU & Memory Load</span>
+                  <strong id="chartCpuLabel" class="text-amber">18.4% CPU • 3420 MB</strong>
+                </div>
+                <svg id="cpuChartSvg" class="sparkline-svg" viewBox="0 0 360 95" preserveAspectRatio="none"></svg>
+              </div>
+              <div class="chart-box">
+                <div class="chart-title-row">
+                  <span>World Save Duration (ms)</span>
+                  <strong id="chartSaveLabel" class="text-emerald">42.6 ms</strong>
+                </div>
+                <svg id="saveChartSvg" class="sparkline-svg" viewBox="0 0 360 95" preserveAspectRatio="none"></svg>
+              </div>
+            </div>
+
+            <!-- Supervisor Processes inside lloesche/valheim-server -->
+            <div class="supervisor-strip" id="supervisorServicesStrip"></div>
+          </div>
+        </div>
+
+        <!-- Right Column: Quick Command Bar + Live Event Chronicle -->
+        <div class="overview-col">
+          <!-- Fast Command Bar -->
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">⚡ Quick Server Command & Broadcast</h2>
+                <p class="panel-subtitle">Issue RCON, Supervisor, or Server Commands directly</p>
+              </div>
+              <button class="btn btn-xs btn-glass" onclick="switchTab('commands')">Full Command Deck →</button>
+            </div>
+            <form class="quick-cmd-form" onsubmit="handleQuickCommand(event)">
+              <input
+                type="text"
+                id="quickCommandInput"
+                class="input-mono"
+                placeholder="Type command (e.g. save, say Dinner is ready!, randomevent wolves, info)..."
+                autocomplete="off"
+              />
+              <button type="submit" class="btn btn-amber">Execute</button>
+            </form>
+            <div class="quick-chips-row">
+              <button class="chip-btn" onclick="runPresetCommand('save')">💾 save</button>
+              <button class="chip-btn" onclick="runPresetCommand('info')">ℹ️ info</button>
+              <button class="chip-btn" onclick="runPresetCommand('say Skål Vikings! Server backup in 5 minutes.')">📣 Broadcast</button>
+              <button class="chip-btn" onclick="runPresetCommand('env Clear')">☀️ Clear Weather</button>
+              <button class="chip-btn" onclick="runPresetCommand('stopevent')">🛑 Stop Raid</button>
+              <button class="chip-btn" onclick="runPresetCommand('supervisorctl status')">🔧 Supervisor Status</button>
+            </div>
+            <pre class="quick-cmd-output hidden" id="quickCommandOutput"></pre>
+          </div>
+
+          <!-- Event Chronicle -->
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">📜 Chronicle of the Tenth World</h2>
+                <p class="panel-subtitle">Live feed of logins, logouts, deaths, raids & backups</p>
+              </div>
+              <div class="filter-pills" id="eventFilterPills">
+                <button class="pill active" onclick="setEventFilter('all', this)">All</button>
+                <button class="pill" onclick="setEventFilter('join', this)">Logins</button>
+                <button class="pill" onclick="setEventFilter('death', this)">Deaths</button>
+                <button class="pill" onclick="setEventFilter('raid', this)">Raids</button>
+              </div>
+            </div>
+            <div class="chronicle-feed" id="chronicleFeed"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 2: VIKING ROSTER & STATS ==================== -->
+    <section class="tab-panel" id="tab-players">
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">⚔️ Hall of Vikings — Complete Player Analytics</h2>
+            <p class="panel-subtitle">Tracks online status, last login timestamp, total playtime, session count, and deaths</p>
+          </div>
+          <div class="roster-controls">
+            <input
+              type="text"
+              id="playerSearchInput"
+              class="input-search"
+              placeholder="Search Viking name or SteamID64..."
+              oninput="renderPlayersTable()"
+            />
+            <select id="playerFilterSelect" class="select-control" onchange="renderPlayersTable()">
+              <option value="all">All Vikings</option>
+              <option value="online">Currently Online</option>
+              <option value="offline">Offline</option>
+              <option value="admin">Server Admins</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="viking-table">
+            <thead>
+              <tr>
+                <th>Viking</th>
+                <th>Status</th>
+                <th>Last Login / Seen</th>
+                <th>First Seen</th>
+                <th>Total Playtime</th>
+                <th>Sessions</th>
+                <th>Deaths 💀</th>
+                <th>Roles</th>
+                <th class="text-right">Quick Actions</th>
+              </tr>
+            </thead>
+            <tbody id="vikingRosterBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 3: COMMAND DECK & RAIDS ==================== -->
+    <section class="tab-panel" id="tab-commands">
+      <div class="commands-grid">
+        <!-- Left: Interactive Terminal + Categorized Key Commands -->
+        <div class="overview-col">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">💻 Interactive Server & RCON Terminal</h2>
+                <p class="panel-subtitle">Supports Valheim RCON commands, ACL commands, and lloesche/valheim-server supervisorctl</p>
+              </div>
+              <button class="btn btn-xs btn-glass" onclick="clearTerminalOutput()">Clear Output</button>
+            </div>
+
+            <div class="terminal-window" id="terminalHistory">
+              <div class="term-line term-sys">Heimdall Watchtower Command Console initialized.</div>
+              <div class="term-line term-sys">Type 'help', 'info', 'save', 'say &lt;msg&gt;', 'randomevent &lt;name&gt;', or 'supervisorctl status'.</div>
+            </div>
+
+            <form class="terminal-input-row" onsubmit="handleTerminalSubmit(event)">
+              <span class="term-prompt">heimdall@valheim:~$</span>
+              <input
+                type="text"
+                id="terminalCommandInput"
+                class="term-input"
+                placeholder="Enter command..."
+                autocomplete="off"
+              />
+              <button type="submit" class="btn btn-amber">Send</button>
+            </form>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">🎛️ One-Click Key Command Deck</h2>
+                <p class="panel-subtitle">Instant execution for common server management & environment control</p>
+              </div>
+            </div>
+
+            <div class="command-cards-grid">
+              <div class="cmd-card" onclick="executeDeckCommand('save')">
+                <div class="cmd-card-title">💾 Force World Save</div>
+                <div class="cmd-card-code">save</div>
+                <div class="cmd-card-desc">Flushes all active ZDOs to Midgard.db immediately</div>
+              </div>
+              <div class="cmd-card" onclick="executeDeckCommand('info')">
+                <div class="cmd-card-title">📊 Server Info Snapshot</div>
+                <div class="cmd-card-code">info</div>
+                <div class="cmd-card-desc">Prints version, join code, ZDO count & connected players</div>
+              </div>
+              <div class="cmd-card" onclick="executeDeckCommand('supervisorctl status')">
+                <div class="cmd-card-title">⚙️ Supervisor Daemons</div>
+                <div class="cmd-card-code">supervisorctl status</div>
+                <div class="cmd-card-desc">Checks valheim-server, valheim-backup & valheim-updater</div>
+              </div>
+              <div class="cmd-card" onclick="executeDeckCommand('env Clear')">
+                <div class="cmd-card-title">☀️ Force Clear Skies</div>
+                <div class="cmd-card-code">env Clear</div>
+                <div class="cmd-card-desc">Clears fog, rain, or storms across the world</div>
+              </div>
+              <div class="cmd-card" onclick="executeDeckCommand('env ThunderStorm')">
+                <div class="cmd-card-title">⛈️ Summon Thor's Storm</div>
+                <div class="cmd-card-code">env ThunderStorm</div>
+                <div class="cmd-card-desc">Triggers lightning & heavy thunderstorm weather</div>
+              </div>
+              <div class="cmd-card" onclick="executeDeckCommand('tod 0.5')">
+                <div class="cmd-card-title">🕛 Lock High Noon</div>
+                <div class="cmd-card-code">tod 0.5</div>
+                <div class="cmd-card-desc">Sets time of day to bright midday (use tod -1 to reset)</div>
+              </div>
+              <div class="cmd-card" onclick="executeDeckCommand('tod -1')">
+                <div class="cmd-card-title">🌙 Restore Natural Time</div>
+                <div class="cmd-card-code">tod -1</div>
+                <div class="cmd-card-desc">Unlocks time of day back to normal day/night cycle</div>
+              </div>
+              <div class="cmd-card" onclick="executeDeckCommand('listkeys')">
+                <div class="cmd-card-title">🗝️ List Global Boss Keys</div>
+                <div class="cmd-card-code">listkeys</div>
+                <div class="cmd-card-desc">Shows defeated Forsaken bosses & world progression keys</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Raid Event Launcher & History -->
+        <div class="overview-col">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">⚔️ Forsaken Raid Launcher & Tracker</h2>
+                <p class="panel-subtitle">Trigger any Valheim random event or stop an active raid immediately</p>
+              </div>
+              <button class="btn btn-crimson btn-sm" onclick="executeDeckCommand('stopevent')">
+                🛑 Stop Active Raid
+              </button>
+            </div>
+
+            <div class="raid-catalog-grid" id="raidCatalogGrid"></div>
+
+            <div class="subpanel-divider"></div>
+            <h3 class="subpanel-title">Recent Raid History on Server</h3>
+            <div id="recentRaidsList" class="recent-raids-list"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 4: ACCESS CONTROL LISTS (ACL) ==================== -->
+    <section class="tab-panel" id="tab-acl">
+      <div class="panel acl-top-panel">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">📜 Add Viking to Server Access Lists (/config/*.txt)</h2>
+            <p class="panel-subtitle">Directly updates <code>adminlist.txt</code>, <code>permittedlist.txt</code>, and <code>bannedlist.txt</code> inside the shared <code>/config</code> volume</p>
+          </div>
+        </div>
+        <form class="acl-add-form" onsubmit="handleAclSubmit(event)">
+          <select id="aclKnownPlayerSelect" class="select-control" onchange="populateAclFromKnownPlayer(this.value)">
+            <option value="">— Pick from Known Vikings or enter manually —</option>
+          </select>
+          <input type="text" id="aclSteamIdInput" class="input-mono" placeholder="SteamID64 (e.g. 76561198042198311)" required />
+          <input type="text" id="aclNameInput" class="input-control" placeholder="Viking Name / Alias" />
+          <select id="aclListTypeSelect" class="select-control">
+            <option value="admins">👑 Server Admins (adminlist.txt)</option>
+            <option value="permitted">🛡️ Whitelisted (permittedlist.txt)</option>
+            <option value="banned">🚫 Banned Exiles (bannedlist.txt)</option>
+          </select>
+          <button type="submit" class="btn btn-amber">+ Add Entry</button>
+        </form>
+      </div>
+
+      <div class="acl-columns-grid">
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">👑 Server Admins</h3>
+              <p class="panel-subtitle"><code>/config/adminlist.txt</code></p>
+            </div>
+            <span class="mono-badge" id="aclAdminsCount">0</span>
+          </div>
+          <div class="acl-list" id="aclAdminsList"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">🛡️ Permitted Whitelist</h3>
+              <p class="panel-subtitle"><code>/config/permittedlist.txt</code></p>
+            </div>
+            <span class="mono-badge" id="aclPermittedCount">0</span>
+          </div>
+          <div class="acl-list" id="aclPermittedList"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <h3 class="panel-title">🚫 Banned Exiles</h3>
+              <p class="panel-subtitle"><code>/config/bannedlist.txt</code></p>
+            </div>
+            <span class="mono-badge" id="aclBannedCount">0</span>
+          </div>
+          <div class="acl-list" id="aclBannedList"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 5: BACKUPS & WORLDS ==================== -->
+    <section class="tab-panel" id="tab-backups">
+      <div class="overview-grid">
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title">🏛️ World Backup Vault (<code>/config/backups</code>)</h2>
+              <p class="panel-subtitle">Managed by <code>lloesche/valheim-server</code> backup daemon • Download or trigger instant snapshots</p>
+            </div>
+            <button class="btn btn-amber" onclick="createNewBackup()">
+              🛡️ Create Hot Backup Now
+            </button>
+          </div>
+          <div id="backupsListContainer" class="backups-list"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title">🌍 Active World Files & Container Schedule</h2>
+              <p class="panel-subtitle">Inspect <code>/config/worlds_local</code> and automated cron schedules</p>
+            </div>
+          </div>
+          <div id="worldsListContainer" class="worlds-list"></div>
+
+          <div class="subpanel-divider"></div>
+          <h3 class="subpanel-title">Container Environment & Cron Configuration</h3>
+          <div id="envConfigGrid" class="env-config-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 6: LIVE SERVER LOGS ==================== -->
+    <section class="tab-panel" id="tab-logs">
+      <div class="panel">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">📡 Live Container & Valheim Server Log Stream</h2>
+            <p class="panel-subtitle">Real-time stdout/stderr stream with automatic event classification</p>
+          </div>
+          <div class="roster-controls">
+            <div class="filter-pills" id="logCategoryPills">
+              <button class="pill active" onclick="setLogFilter('all', this)">All</button>
+              <button class="pill" onclick="setLogFilter('player', this)">Players</button>
+              <button class="pill" onclick="setLogFilter('death', this)">Deaths</button>
+              <button class="pill" onclick="setLogFilter('raid', this)">Raids</button>
+              <button class="pill" onclick="setLogFilter('save', this)">World Saves</button>
+            </div>
+            <input
+              type="text"
+              id="logSearchInput"
+              class="input-search"
+              placeholder="Filter log lines..."
+              oninput="renderLogStream()"
+            />
+          </div>
+        </div>
+
+        <div class="log-viewer" id="logStreamContainer"></div>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 7: MODIFIERS, CONFIG & DISCORD ==================== -->
+    <section class="tab-panel" id="tab-settings">
+      <div class="overview-grid">
+        <!-- Left: World Modifiers + Discord Webhook -->
+        <div class="overview-col">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">⚖️ Valheim World Modifiers & <code>SERVER_ARGS</code> Builder</h2>
+                <p class="panel-subtitle">Customize combat, death penalty, resource rate, raids & portals for your Portainer stack</p>
+              </div>
+            </div>
+
+            <div class="modifiers-grid">
+              <div class="form-group">
+                <label>World Preset</label>
+                <select id="modPreset" class="select-control" onchange="updateServerArgsPreview()">
+                  <option value="Normal">Normal (Default)</option>
+                  <option value="casual">Casual</option>
+                  <option value="easy">Easy</option>
+                  <option value="hard">Hard</option>
+                  <option value="hardcore">Hardcore</option>
+                  <option value="immersive">Immersive (No Map / No Portals)</option>
+                  <option value="hammer">Hammer Mode (Free Build)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Combat Difficulty</label>
+                <select id="modCombat" class="select-control" onchange="updateServerArgsPreview()">
+                  <option value="default">Default</option>
+                  <option value="veryeasy">Very Easy</option>
+                  <option value="easy">Easy</option>
+                  <option value="hard">Hard</option>
+                  <option value="veryhard">Very Hard</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Death Penalty</label>
+                <select id="modDeath" class="select-control" onchange="updateServerArgsPreview()">
+                  <option value="default">Default</option>
+                  <option value="casual">Casual (Keep Equipped)</option>
+                  <option value="veryeasy">Very Easy</option>
+                  <option value="easy">Easy</option>
+                  <option value="hard">Hard</option>
+                  <option value="hardcore">Hardcore (Permadeath / Wipe)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Resource Drop Rate</label>
+                <select id="modResources" class="select-control" onchange="updateServerArgsPreview()">
+                  <option value="default">1x (Default)</option>
+                  <option value="less">0.5x (Less)</option>
+                  <option value="more">1.5x (More)</option>
+                  <option value="muchmore">2x (Much More)</option>
+                  <option value="most">3x (Most)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Raid Frequency</label>
+                <select id="modRaids" class="select-control" onchange="updateServerArgsPreview()">
+                  <option value="default">Default</option>
+                  <option value="none">None (No Raids)</option>
+                  <option value="muchless">Much Less</option>
+                  <option value="less">Less</option>
+                  <option value="more">More</option>
+                  <option value="muchmore">Much More</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Portal Rules</label>
+                <select id="modPortals" class="select-control" onchange="updateServerArgsPreview()">
+                  <option value="default">Default (No Ore Teleport)</option>
+                  <option value="casual">Casual (Teleport Anything / Metals!)</option>
+                  <option value="hard">Hard (No Portals Allowed)</option>
+                  <option value="veryhard">Very Hard (No Boss Portals)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="generated-args-box">
+              <div class="args-label-row">
+                <span>Generated <code>SERVER_ARGS</code> for <code>lloesche/valheim-server</code>:</span>
+                <button class="btn btn-xs btn-glass" onclick="copyGeneratedArgs()">Copy Env Line</button>
+              </div>
+              <code id="generatedServerArgsCode">SERVER_ARGS=""</code>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">🔔 Discord Webhook & RCON Integration</h2>
+                <p class="panel-subtitle">Send rich Norse alerts to your clan's Discord channel on joins, deaths, raids & backups</p>
+              </div>
+            </div>
+
+            <form onsubmit="saveIntegrationSettings(event)" class="settings-form">
+              <div class="form-group">
+                <label>Discord Webhook URL</label>
+                <div class="input-with-btn">
+                  <input
+                    type="url"
+                    id="settingDiscordWebhook"
+                    class="input-control"
+                    placeholder="https://discord.com/api/webhooks/..."
+                  />
+                  <button type="button" class="btn btn-frost" onclick="testDiscordWebhook()">Test Embed</button>
+                </div>
+              </div>
+
+              <div class="checkbox-grid">
+                <label class="check-label"><input type="checkbox" id="chkJoin" checked /> Viking Logins</label>
+                <label class="check-label"><input type="checkbox" id="chkLeave" checked /> Viking Logouts</label>
+                <label class="check-label"><input type="checkbox" id="chkDeath" checked /> Player Deaths (💀)</label>
+                <label class="check-label"><input type="checkbox" id="chkRaid" checked /> Raid Events (⚔️)</label>
+                <label class="check-label"><input type="checkbox" id="chkBackup" checked /> World Backups (🛡️)</label>
+              </div>
+
+              <div class="subpanel-divider"></div>
+              <div class="modifiers-grid">
+                <div class="form-group">
+                  <label>RCON Host</label>
+                  <input type="text" id="settingRconHost" class="input-mono" value="valheim-server" />
+                </div>
+                <div class="form-group">
+                  <label>RCON Port</label>
+                  <input type="number" id="settingRconPort" class="input-mono" value="2458" />
+                </div>
+              </div>
+
+              <button type="submit" class="btn btn-amber">💾 Save Watchtower Settings</button>
+            </form>
+          </div>
+        </div>
+
+        <!-- Right: BepInEx / ValheimPlus Config File Editor -->
+        <div class="overview-col">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">🧩 BepInEx & Server Config Editor</h2>
+                <p class="panel-subtitle">View and edit <code>/config/bepinex/config/*.cfg</code> directly from the browser</p>
+              </div>
+              <div class="panel-actions">
+                <select id="modConfigFileSelect" class="select-control" onchange="loadSelectedModConfig(this.value)"></select>
+                <button class="btn btn-emerald btn-sm" onclick="saveCurrentModConfig()">Save File</button>
+              </div>
+            </div>
+            <textarea
+              id="modConfigEditor"
+              class="config-editor-textarea"
+              spellcheck="false"
+              placeholder="Select a .cfg file to edit..."
+            ></textarea>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 8: LIVE WORLD MAP & VIKING HEALTH ==================== -->
+    <section class="tab-panel" id="tab-map">
+      <div class="map-workspace-grid">
+        <!-- Left: Interactive Procedural World Map + Fog of War + Live Radar -->
+        <div class="panel map-canvas-panel">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title">🗺️ Yggdrasil Cartography — Shared World Map & Live Positions</h2>
+              <p class="panel-subtitle">
+                World: <strong id="mapWorldNameLabel">Midgard</strong> • Seed: <code id="mapSeedLabel">Yggdrasil9</code> •
+                Source: <span class="text-frost" id="mapTelemetrySourceLabel">BepInEx ZDO Bridge</span>
+              </p>
+            </div>
+            <div class="map-toolbar">
+              <label class="map-toggle-pill">
+                <input type="checkbox" id="toggleFogOfWar" checked onchange="drawValheimMap()" />
+                <span>🌫️ Shared Fog of War</span>
+              </label>
+              <label class="map-toggle-pill">
+                <input type="checkbox" id="togglePortals" checked onchange="drawValheimMap()" />
+                <span>🌀 Portals</span>
+              </label>
+              <label class="map-toggle-pill">
+                <input type="checkbox" id="toggleBosses" checked onchange="drawValheimMap()" />
+                <span>🦌 Altars & Traders</span>
+              </label>
+              <label class="map-toggle-pill">
+                <input type="checkbox" id="toggleTombstones" checked onchange="drawValheimMap()" />
+                <span>💀 Tombstones</span>
+              </label>
+              <button class="btn btn-xs btn-glass" onclick="resetMapView()">🎯 Reset Zoom</button>
+            </div>
+          </div>
+
+          <div class="map-viewport-wrapper">
+            <canvas id="valheimMapCanvas" width="820" height="680"></canvas>
+            <div class="map-hud-overlay">
+              <div class="map-coords-readout" id="mapCursorReadout">X: 0, Z: 0 • Meadows</div>
+              <div class="map-legend">
+                <span class="legend-dot" style="background:#4ade80"></span>Meadows
+                <span class="legend-dot" style="background:#15803d"></span>Black Forest
+                <span class="legend-dot" style="background:#78350f"></span>Swamp
+                <span class="legend-dot" style="background:#e2e8f0"></span>Mountains
+                <span class="legend-dot" style="background:#eab308"></span>Plains
+                <span class="legend-dot" style="background:#a855f7"></span>Mistlands
+                <span class="legend-dot" style="background:#ef4444"></span>Ashlands
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Live Viking Health / Stamina / Food Buffs + Tombstones + Portals -->
+        <div class="overview-col">
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">❤️ Live Viking Vitals, Biome & Coordinates</h2>
+                <p class="panel-subtitle">Real-time HP, Stamina, active food buffs, and world coordinates from ZDOMan</p>
+              </div>
+            </div>
+            <div id="liveVitalsList" class="live-vitals-list"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">💀 Active Death Tombstones & 🌀 Portal Network</h2>
+                <p class="panel-subtitle">Click any tombstone, portal, or boss altar to pan the map to its exact coordinates</p>
+              </div>
+            </div>
+            <div id="mapTombstonesAndPortals" class="map-poi-list"></div>
+
+            <div class="subpanel-divider"></div>
+            <div class="bepinex-bridge-banner">
+              <div class="viking-name-line">🔌 How Live Map & Health Works on <code>lloesche/valheim-server</code></div>
+              <p style="font-size:0.76rem;color:var(--text-secondary);margin-top:0.25rem">
+                Vanilla Valheim stdout logs only emit ZDOIDs on spawn/death. By setting <code>BEPINEX="true"</code> on your
+                <code>lloesche/valheim-server</code> container and dropping the included
+                <code>bepinex-plugin/WatchtowerMapExporter.cs</code> plugin into <code>/config/bepinex/plugins</code>,
+                the server exports live player <code>(X, Y, Z)</code> coordinates, <code>health</code> / <code>max_health</code> ZDO floats,
+                Cartography Table discoveries, portals, and tombstones directly to <code>/config/watchtower/live_map.json</code> every 2s.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Toast Notification Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
