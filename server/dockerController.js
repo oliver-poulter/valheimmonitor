@@ -66,11 +66,24 @@ class DockerController {
         this.currentStatus.mode = 'docker';
         await this.refreshContainerStatus();
         this.attachContainerLogs();
-        if (process.env.AUTO_CONFIGURE_SERVER === 'true') {
-          // Only run on boot if explicitly opted in via AUTO_CONFIGURE_SERVER=true
+
+        // Automatically install or upgrade WatchtowerMapExporter.dll to v1.4.0 inside valheim-server if not yet on v1.4.0
+        if (process.env.AUTO_CONFIGURE_SERVER !== 'false') {
           setTimeout(() => {
-            this.autoConfigureValheimServer({ forceRestart: false }).catch(() => {});
-          }, 15000);
+            try {
+              const liveMapPath = path.join(this.configManager.watchtowerDir, 'live_map.json');
+              let alreadyLatest = false;
+              if (fs.existsSync(liveMapPath)) {
+                const parsed = JSON.parse(fs.readFileSync(liveMapPath, 'utf8'));
+                if (parsed && parsed.pluginVersion === '1.4.0' && parsed.pluginStatus === 'active') {
+                  alreadyLatest = true;
+                }
+              }
+              if (!alreadyLatest) {
+                this.autoConfigureValheimServer({ forceRestart: true }).catch(() => {});
+              }
+            } catch (_) {}
+          }, 8000);
         }
       } else {
         this.setupSimulationMode();
@@ -121,8 +134,8 @@ class DockerController {
       this.currentStatus.autoConfigState = 'configured';
       return {
         ok: true,
-        output: '[Preview Mode] Deployed WatchtowerMapExporter.dll to /config/bepinex/plugins/',
-        message: 'Deployed WatchtowerMapExporter.dll to /config/bepinex/plugins/ (Preview Mode).'
+        output: '[Preview Mode] Deployed WatchtowerMapExporter.dll v1.4.0 to /config/bepinex/plugins/',
+        message: 'Deployed WatchtowerMapExporter.dll v1.4.0 to /config/bepinex/plugins/ (Preview Mode).'
       };
     }
 
@@ -158,7 +171,10 @@ class DockerController {
       echo "[4/5] Checking BepInEx installation in /opt/valheim/bepinex..."
       export BEPINEX=true
       if [ ! -f /opt/valheim/bepinex/valheim_server.x86_64 ] || [ ! -d /opt/valheim/bepinex/BepInEx ]; then
-        echo "Downloading & merging BepInEx via /usr/local/bin/bepinex-updater..."
+        echo "Signaling /opt/valheim/dl/bepinex/merge & running /usr/local/bin/bepinex-updater..."
+        mkdir -p /opt/valheim/dl/bepinex
+        touch /opt/valheim/dl/bepinex/merge
+        export DEBUG_REINSTALL_BEPINEX=true
         /usr/local/bin/bepinex-updater || true
         NEEDS_RESTART=1
       fi
@@ -166,7 +182,7 @@ class DockerController {
       mkdir -p /opt/valheim/bepinex/BepInEx/plugins
       if [ -f /config/bepinex/plugins/WatchtowerMapExporter.dll ]; then
         cp -f /config/bepinex/plugins/WatchtowerMapExporter.dll /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll || true
-        echo "Installed WatchtowerMapExporter.dll into /opt/valheim/bepinex/BepInEx/plugins/"
+        echo "Installed WatchtowerMapExporter.dll v1.4.0 into /opt/valheim/bepinex/BepInEx/plugins/"
       fi
 
       # Ensure non-root Valheim server user (PUID/PGID) owns BepInEx and can write to /config/watchtower
@@ -176,11 +192,11 @@ class DockerController {
       chmod -R 777 /config/watchtower 2>/dev/null || true
 
       if [ "${forceRestart ? '1' : '0'}" = "1" ] || [ "$NEEDS_RESTART" = "1" ]; then
-        echo "[5/5] Gracefully restarting valheim-server with BepInEx enabled..."
+        echo "[5/5] Gracefully restarting valheim-server with BepInEx v1.4.0 enabled..."
         supervisorctl restart valheim-server || true
         echo "RESTARTED_WITH_BEPINEX"
       else
-        echo "[5/5] BepInEx and WatchtowerMapExporter.dll already active."
+        echo "[5/5] BepInEx and WatchtowerMapExporter.dll v1.4.0 already active."
         echo "ALREADY_CONFIGURED"
       fi
     `;
@@ -193,7 +209,7 @@ class DockerController {
         JSON.stringify(
           {
             pluginStatus: 'configuring_and_restarting_server',
-            pluginVersion: '1.2.0',
+            pluginVersion: '1.4.0',
             worldName: this.configManager.state.serverMeta.worldName || 'Dedicated',
             lastUpdated: timestamp,
             players: []
