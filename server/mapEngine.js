@@ -14,6 +14,8 @@ class ValheimMapEngine {
   constructor(configManager) {
     this.configManager = configManager;
     this.liveMapFile = path.join(this.configManager.watchtowerDir, 'live_map.json');
+    this.worldTerrainFile = path.join(this.configManager.watchtowerDir, 'world_terrain.json');
+    this.terrainMtime = 0;
     this.isDockerMode = fs.existsSync(process.env.DOCKER_SOCKET || '/var/run/docker.sock');
 
     this.mapState = {
@@ -26,13 +28,19 @@ class ValheimMapEngine {
         : 'BepInEx ZDO Bridge (Simulated Preview)',
       bepinexTelemetryActive: false,
       lastUpdated: new Date().toISOString(),
+      terrainGrid: null,
       discoveredZones: [
-        { x: 0, z: 0, radius: 1100, discoveredBy: 'Sacrificial Stones (Spawn)', biome: 'Meadows' }
+        { x: 0, z: 0, radius: 1350, discoveredBy: 'Sacrificial Stones (Spawn)', biome: 'Meadows' }
       ],
       livePlayers: {},
       portals: [],
       landmarks: [
-        { id: 'lm-spawn', type: 'spawn', name: 'Sacrificial Stones (World Spawn)', x: 0, z: 0, biome: 'Meadows', icon: '🪨', status: 'Active' }
+        { id: 'lm-spawn', type: 'spawn', name: 'Sacrificial Stones', x: 0, z: 0, biome: 'Meadows', icon: '🏛️', status: 'Active' },
+        { id: 'lm-eikthyr', type: 'boss', name: 'EIKTHYR', x: -180, z: -340, biome: 'Meadows', icon: '🦌', status: 'Forsaken Altar' },
+        { id: 'lm-elder', type: 'boss', name: 'THE ELDER', x: 1420, z: 1180, biome: 'Black Forest', icon: '🌲', status: 'Forsaken Altar' },
+        { id: 'lm-bonemass', type: 'boss', name: 'BONEMASS', x: -2450, z: 1850, biome: 'Swamp', icon: '☠️', status: 'Forsaken Altar' },
+        { id: 'lm-moder', type: 'boss', name: 'MODER', x: 2150, z: -2680, biome: 'Mountains', icon: '🐉', status: 'Forsaken Altar' },
+        { id: 'lm-yagluth', type: 'boss', name: 'YAGLUTH', x: -3850, z: -2150, biome: 'Plains', icon: '👑', status: 'Forsaken Altar' }
       ],
       tombstones: []
     };
@@ -41,9 +49,31 @@ class ValheimMapEngine {
       this.seedPreviewData();
     } else {
       this.inspectRealWorldFiles();
+      this.loadTerrainFileIfUpdated();
     }
 
     this.startLiveTick();
+  }
+
+  loadTerrainFileIfUpdated() {
+    try {
+      if (!fs.existsSync(this.worldTerrainFile)) return;
+      const stat = fs.statSync(this.worldTerrainFile);
+      if (stat.mtimeMs <= this.terrainMtime) return;
+      this.terrainMtime = stat.mtimeMs;
+      const raw = JSON.parse(fs.readFileSync(this.worldTerrainFile, 'utf8'));
+      if (raw && raw.biomesBase64 && raw.heightsBase64) {
+        this.mapState.terrainGrid = {
+          gridSize: raw.gridSize || 200,
+          seaLevelByte: raw.seaLevelByte || 40,
+          biomesBase64: raw.biomesBase64,
+          heightsBase64: raw.heightsBase64
+        };
+        if (Array.isArray(raw.landmarks) && raw.landmarks.length > 0) {
+          this.mapState.landmarks = raw.landmarks;
+        }
+      }
+    } catch (_) {}
   }
 
   /**
@@ -132,6 +162,7 @@ class ValheimMapEngine {
   }
 
   tickLiveState() {
+    this.loadTerrainFileIfUpdated();
     if (this.isDockerMode) {
       this.inspectRealWorldFiles();
     }

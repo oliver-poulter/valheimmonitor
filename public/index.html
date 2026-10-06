@@ -715,8 +715,12 @@
             </div>
             <div class="map-toolbar">
               <label class="map-toggle-pill">
-                <input type="checkbox" id="toggleFogOfWar" checked onchange="drawValheimMap()" />
-                <span>🌫️ Shared Fog of War</span>
+                <input type="checkbox" id="toggleBiomeBorders" checked onchange="invalidateTerrainCacheAndDraw()" />
+                <span>🗺️ Biome Borders</span>
+              </label>
+              <label class="map-toggle-pill">
+                <input type="checkbox" id="toggleFogOfWar" onchange="drawValheimMap()" />
+                <span>📜 Parchment Fog</span>
               </label>
               <label class="map-toggle-pill">
                 <input type="checkbox" id="togglePortals" checked onchange="drawValheimMap()" />
@@ -724,7 +728,7 @@
               </label>
               <label class="map-toggle-pill">
                 <input type="checkbox" id="toggleBosses" checked onchange="drawValheimMap()" />
-                <span>🦌 Altars & Traders</span>
+                <span>🦌 Altars &amp; Traders</span>
               </label>
               <label class="map-toggle-pill">
                 <input type="checkbox" id="toggleTombstones" checked onchange="drawValheimMap()" />
@@ -739,13 +743,13 @@
             <div class="map-hud-overlay">
               <div class="map-coords-readout" id="mapCursorReadout">X: 0, Z: 0 • Meadows</div>
               <div class="map-legend">
-                <span class="legend-dot" style="background:#4ade80"></span>Meadows
-                <span class="legend-dot" style="background:#15803d"></span>Black Forest
-                <span class="legend-dot" style="background:#78350f"></span>Swamp
-                <span class="legend-dot" style="background:#e2e8f0"></span>Mountains
-                <span class="legend-dot" style="background:#eab308"></span>Plains
-                <span class="legend-dot" style="background:#a855f7"></span>Mistlands
-                <span class="legend-dot" style="background:#ef4444"></span>Ashlands
+                <span class="legend-dot" style="background:#76a04b"></span>Meadows
+                <span class="legend-dot" style="background:#2f5c39"></span>Black Forest
+                <span class="legend-dot" style="background:#544330"></span>Swamp
+                <span class="legend-dot" style="background:#dce4ee"></span>Mountains
+                <span class="legend-dot" style="background:#c89d3c"></span>Plains
+                <span class="legend-dot" style="background:#6d4792"></span>Mistlands
+                <span class="legend-dot" style="background:#b03028"></span>Ashlands
               </div>
             </div>
           </div>

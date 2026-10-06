@@ -1131,8 +1131,8 @@ function initMapCanvasInteraction() {
     'wheel',
     (e) => {
       e.preventDefault();
-      const factor = e.deltaY < 0 ? 1.16 : 0.86;
-      mapZoom = Math.max(0.65, Math.min(5.0, mapZoom * factor));
+      const factor = e.deltaY < 0 ? 1.18 : 0.85;
+      mapZoom = Math.max(0.75, Math.min(8.0, mapZoom * factor));
       drawValheimMap();
     },
     { passive: false }
@@ -1152,7 +1152,7 @@ function focusMapOnCoords(x, z, label = '') {
   if (!canvas) return;
   const worldRadius = 10500;
   const baseRadiusPx = Math.min(canvas.width, canvas.height) * 0.44;
-  mapZoom = 2.1;
+  mapZoom = 2.6;
   mapPanX = -(x / worldRadius) * (baseRadiusPx * mapZoom);
   mapPanZ = (z / worldRadius) * (baseRadiusPx * mapZoom);
   drawValheimMap();
@@ -1170,6 +1170,12 @@ function jumpToVikingOnMap(steamId) {
 function estimateClientBiome(x, z) {
   const dist = Math.hypot(x, z);
   if (dist > 10500) return 'World Edge';
+  if (cachedBiomeLookup && cachedBiomeLookup.length === TERRAIN_RES * TERRAIN_RES) {
+    const px = Math.max(0, Math.min(TERRAIN_RES - 1, Math.round(((x / 10500 + 1) * 0.5) * (TERRAIN_RES - 1))));
+    const py = Math.max(0, Math.min(TERRAIN_RES - 1, Math.round(((1 - z / 10500) * 0.5) * (TERRAIN_RES - 1))));
+    const bCode = cachedBiomeLookup[py * TERRAIN_RES + px];
+    return BIOME_NAMES_BY_CODE[bCode] || 'Ocean';
+  }
   if (z < -7200) return 'Ashlands';
   if (z > 7200) return 'Deep North';
   if (dist < 850) return 'Meadows';
@@ -1321,8 +1327,32 @@ function renderLiveMapAndVitals() {
   drawValheimMap();
 }
 
-function generateSeedContinents(seedNumeric) {
-  let s = (Number(seedNumeric) || 84920177) >>> 0;
+const BIOME_NAMES_BY_CODE = {
+  0: 'Ocean',
+  1: 'Meadows',
+  2: 'Black Forest',
+  3: 'Swamp',
+  4: 'Mountains',
+  5: 'Plains',
+  6: 'Mistlands',
+  7: 'Ashlands',
+  8: 'Deep North'
+};
+
+let cachedTerrainCanvas = null;
+let cachedTerrainKey = '';
+let cachedBiomeLookup = null;
+let cachedBiomeLabels = [];
+let cachedParchmentCanvas = null;
+const TERRAIN_RES = 600;
+
+function invalidateTerrainCacheAndDraw() {
+  cachedTerrainKey = '';
+  drawValheimMap();
+}
+
+function createSeededNoise2D(seedInput) {
+  let s = (Number(seedInput) || 84920177) >>> 0;
   if (s === 0) s = 84920177;
   const rand = () => {
     s = (s + 0x6d2b79f5) | 0;
@@ -1331,49 +1361,615 @@ function generateSeedContinents(seedNumeric) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 
-  const landmasses = [
-    // Central Starting Island (Meadows & Black Forest around 0,0)
-    { wx: 0, wz: 0, rx: 920 + rand() * 320, rz: 740 + rand() * 260, rot: (rand() - 0.5) * 1.2, color: '#38a169' },
-    { wx: (rand() - 0.5) * 1100, wz: (rand() - 0.5) * 1100, rx: 720 + rand() * 250, rz: 520 + rand() * 200, rot: (rand() - 0.5) * 1.5, color: '#166534' }
-  ];
+  const perm = new Uint8Array(512);
+  const gradX = new Float32Array(256);
+  const gradY = new Float32Array(256);
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) {
+    p[i] = i;
+    const ang = rand() * Math.PI * 2;
+    gradX[i] = Math.cos(ang);
+    gradY[i] = Math.sin(ang);
+  }
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    const tmp = p[i];
+    p[i] = p[j];
+    p[j] = tmp;
+  }
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
 
-  // Inner Ring (Black Forest / Swamp / Mountains)
-  const innerColors = ['#166534', '#5c3a21', '#cbd5e1', '#38a169', '#5c3a21'];
-  for (let i = 0; i < 6; i++) {
-    const angle = (i / 6) * Math.PI * 2 + (rand() - 0.5) * 0.55;
-    const dist = 1600 + rand() * 1400;
-    landmasses.push({
-      wx: Math.cos(angle) * dist,
-      wz: Math.sin(angle) * dist,
-      rx: 750 + rand() * 480,
-      rz: 520 + rand() * 340,
-      rot: (rand() - 0.5) * Math.PI,
-      color: innerColors[i % innerColors.length]
-    });
+  const noise2D = (x, y) => {
+    const X = Math.floor(x) & 255;
+    const Y = Math.floor(y) & 255;
+    const xf = x - Math.floor(x);
+    const yf = y - Math.floor(y);
+    const u = xf * xf * xf * (xf * (xf * 6 - 15) + 10);
+    const v = yf * yf * yf * (yf * (yf * 6 - 15) + 10);
+
+    const aa = perm[perm[X] + Y];
+    const ab = perm[perm[X] + Y + 1];
+    const ba = perm[perm[X + 1] + Y];
+    const bb = perm[perm[X + 1] + Y + 1];
+
+    const dotAA = gradX[aa] * xf + gradY[aa] * yf;
+    const dotBA = gradX[ba] * (xf - 1) + gradY[ba] * yf;
+    const dotAB = gradX[ab] * xf + gradY[ab] * (yf - 1);
+    const dotBB = gradX[bb] * (xf - 1) + gradY[bb] * (yf - 1);
+
+    const x1 = dotAA + u * (dotBA - dotAA);
+    const x2 = dotAB + u * (dotBB - dotAB);
+    return x1 + v * (x2 - x1);
+  };
+
+  const fbm = (x, y, octaves = 5, lacunarity = 2.05, gain = 0.5) => {
+    let total = 0;
+    let amp = 0.5;
+    let freq = 1.0;
+    let norm = 0;
+    for (let i = 0; i < octaves; i++) {
+      total += noise2D(x * freq + i * 17.3, y * freq + i * 31.7) * amp;
+      norm += amp;
+      amp *= gain;
+      freq *= lacunarity;
+    }
+    return total / norm; // roughly [-0.7, 0.7]
+  };
+
+  return { noise2D, fbm };
+}
+
+function getParchmentCanvas() {
+  if (cachedParchmentCanvas) return cachedParchmentCanvas;
+  const pc = document.createElement('canvas');
+  pc.width = 512;
+  pc.height = 512;
+  const pctx = pc.getContext('2d');
+  const img = pctx.createImageData(512, 512);
+  const data = img.data;
+  const { fbm } = createSeededNoise2D(133742);
+
+  for (let y = 0; y < 512; y++) {
+    for (let x = 0; x < 512; x++) {
+      const n1 = fbm(x * 0.012, y * 0.012, 4);
+      const n2 = fbm(x * 0.045, y * 0.045, 3);
+      const v = n1 * 28 + n2 * 10;
+      const idx = (y * 512 + x) * 4;
+      data[idx] = Math.max(135, Math.min(215, Math.round(184 + v)));
+      data[idx + 1] = Math.max(115, Math.min(190, Math.round(160 + v * 0.88)));
+      data[idx + 2] = Math.max(80, Math.min(150, Math.round(116 + v * 0.68)));
+      data[idx + 3] = 255;
+    }
+  }
+  pctx.putImageData(img, 0, 0);
+  cachedParchmentCanvas = pc;
+  return pc;
+}
+
+function decodeBase64ToUint8(b64) {
+  try {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch (_) {
+    return null;
+  }
+}
+
+function ensureValheimTerrainCache(wm) {
+  const showBorders = document.getElementById('toggleBiomeBorders')?.checked !== false;
+  const seedNum = Number(wm.seedNumeric) || 84920177;
+  const hasServerGrid = Boolean(wm.terrainGrid && wm.terrainGrid.biomesBase64 && wm.terrainGrid.heightsBase64);
+  const key = `${seedNum}_${showBorders ? 1 : 0}_${hasServerGrid ? wm.terrainGrid.biomesBase64.length : 0}`;
+
+  if (cachedTerrainCanvas && cachedTerrainKey === key) {
+    return cachedTerrainCanvas;
+  }
+  cachedTerrainKey = key;
+
+  const off = document.createElement('canvas');
+  off.width = TERRAIN_RES;
+  off.height = TERRAIN_RES;
+  const octx = off.getContext('2d');
+  const imgData = octx.createImageData(TERRAIN_RES, TERRAIN_RES);
+  const pixels = imgData.data;
+
+  const { noise2D, fbm } = createSeededNoise2D(seedNum);
+  const heights = new Float32Array(TERRAIN_RES * TERRAIN_RES);
+  const biomes = new Uint8Array(TERRAIN_RES * TERRAIN_RES);
+  const seaLevel = 0.38;
+
+  let srvBiomes = null;
+  let srvHeights = null;
+  let srvSize = 200;
+  let srvSeaByte = 40;
+  if (hasServerGrid) {
+    srvBiomes = decodeBase64ToUint8(wm.terrainGrid.biomesBase64);
+    srvHeights = decodeBase64ToUint8(wm.terrainGrid.heightsBase64);
+    srvSize = wm.terrainGrid.gridSize || 200;
+    srvSeaByte = wm.terrainGrid.seaLevelByte || 40;
   }
 
-  // Outer Ring (Plains & Mistlands)
-  const outerColors = ['#ca8a04', '#6b21a8', '#ca8a04', '#7e22ce', '#ca8a04', '#6b21a8'];
-  for (let i = 0; i < 8; i++) {
-    const angle = (i / 8) * Math.PI * 2 + (rand() - 0.5) * 0.45;
-    const dist = 3600 + rand() * 2600;
-    landmasses.push({
-      wx: Math.cos(angle) * dist,
-      wz: Math.sin(angle) * dist,
-      rx: 950 + rand() * 620,
-      rz: 640 + rand() * 420,
-      rot: (rand() - 0.5) * Math.PI,
-      color: outerColors[i % outerColors.length]
-    });
+  // Pass 1: Compute exact Height & Biome for every pixel in the 600x600 world disc
+  for (let py = 0; py < TERRAIN_RES; py++) {
+    const nz = 1.0 - (py / (TERRAIN_RES - 1)) * 2.0; // [+1 north .. -1 south]
+    const wz = nz * 10500;
+    for (let px = 0; px < TERRAIN_RES; px++) {
+      const nx = (px / (TERRAIN_RES - 1)) * 2.0 - 1.0; // [-1 west .. +1 east]
+      const wx = nx * 10500;
+      const idx = py * TERRAIN_RES + px;
+      const distNorm = Math.hypot(nx, nz);
+
+      if (distNorm > 1.0) {
+        heights[idx] = 0;
+        biomes[idx] = 0;
+        continue;
+      }
+
+      if (srvBiomes && srvHeights && srvBiomes.length === srvSize * srvSize) {
+        // Bilinearly sample real WorldGenerator height + biome grid exported from Valheim server
+        const gx = ((px + 0.5) / TERRAIN_RES) * (srvSize - 1);
+        const gy = ((py + 0.5) / TERRAIN_RES) * (srvSize - 1);
+        const x0 = Math.floor(gx);
+        const y0 = Math.floor(gy);
+        const x1 = Math.min(srvSize - 1, x0 + 1);
+        const y1 = Math.min(srvSize - 1, y0 + 1);
+        const tx = gx - x0;
+        const ty = gy - y0;
+
+        const h00 = srvHeights[y0 * srvSize + x0];
+        const h10 = srvHeights[y0 * srvSize + x1];
+        const h01 = srvHeights[y1 * srvSize + x0];
+        const h11 = srvHeights[y1 * srvSize + x1];
+        const hInterp = h00 * (1 - tx) * (1 - ty) + h10 * tx * (1 - ty) + h01 * (1 - tx) * ty + h11 * tx * ty;
+
+        // Add subtle high-frequency shoreline fractal detail so coastlines are crisp at 600x600
+        const micro = fbm(nx * 22, nz * 22, 3) * 3.2;
+        const hNorm = seaLevel + ((hInterp + micro - srvSeaByte) / 110.0) * 0.55;
+        heights[idx] = Math.max(0.02, Math.min(0.99, hNorm));
+
+        const nearX = Math.round(gx);
+        const nearY = Math.round(gy);
+        const bCode = srvBiomes[nearY * srvSize + nearX];
+        biomes[idx] = heights[idx] < seaLevel ? 0 : bCode || 1;
+        continue;
+      }
+
+      // High-detail multi-octave Valheim procedural terrain & biome generator (seeded from .fwl seedNumeric)
+      const warpX = nx + fbm(nx * 3.2 + 5.1, nz * 3.2 + 1.7, 3) * 0.14;
+      const warpZ = nz + fbm(nx * 3.2 + 9.4, nz * 3.2 + 4.8, 3) * 0.14;
+
+      const continentNoise = fbm(warpX * 2.8, warpZ * 2.8, 5, 2.05, 0.52);
+      const ridgeNoise = 1.0 - Math.abs(noise2D(warpX * 4.5 + 11.2, warpZ * 4.5 - 7.4));
+      const detailNoise = fbm(nx * 14.0, nz * 14.0, 3) * 0.08;
+
+      // Central starting island with organic inner lake/bay (like in-game Valheim starting islands)
+      const startDist = Math.hypot(nx * 1.15, nz * 0.92);
+      let startIslandBias = 0;
+      if (startDist < 0.24) {
+        startIslandBias = (0.24 - startDist) * 1.15;
+        // Carve an organic inner lagoon/lake slightly east of spawn (0,0) while keeping (0,0) dry land
+        const lakeDist = Math.hypot(nx - 0.035, nz + 0.01);
+        if (lakeDist < 0.055 && Math.hypot(nx, nz) > 0.022) {
+          startIslandBias -= (0.055 - lakeDist) * 3.4;
+        }
+      }
+
+      // Carve winding river/fjord channels between continents
+      const riverVal = Math.abs(fbm(warpX * 4.2 + 30.0, warpZ * 4.2 - 18.0, 2));
+      const riverCarve = riverVal < 0.028 && startDist > 0.06 ? (0.028 - riverVal) * 4.2 : 0;
+
+      // Rim drop-off near World Edge
+      const rimDrop = distNorm > 0.88 ? (distNorm - 0.88) * 2.2 : 0;
+
+      let h = 0.41 + continentNoise * 0.58 + detailNoise + startIslandBias - riverCarve - rimDrop;
+      if (h > seaLevel + 0.13) {
+        h += Math.pow(ridgeNoise, 2.2) * 0.22;
+      }
+      h = Math.max(0.02, Math.min(0.99, h));
+      heights[idx] = h;
+
+      if (h < seaLevel) {
+        biomes[idx] = 0; // Ocean
+        continue;
+      }
+
+      // Valheim Biome Assignment Rules (based on world coordinates, elevation, and biome Perlin fields)
+      const bNoise1 = fbm(warpX * 2.4 + 41.0, warpZ * 2.4 - 19.0, 4);
+      const bNoise2 = fbm(warpX * 3.1 - 23.0, warpZ * 3.1 + 67.0, 4);
+      const worldDist = distNorm * 10500;
+
+      let biome = 1; // Default Meadows
+      if (wz < -7300 + bNoise1 * 650) {
+        biome = 7; // Ashlands
+      } else if (wz > 7300 + bNoise1 * 650) {
+        biome = 8; // Deep North
+      } else if (h > 0.67 || (worldDist > 650 && h > 0.61)) {
+        biome = 4; // Mountains (high elevation ridges)
+      } else if (worldDist < 650) {
+        biome = bNoise1 > 0.12 && worldDist > 260 ? 2 : 1; // Meadows around spawn, Black Forest edges
+      } else if (worldDist < 2100) {
+        if (bNoise1 < -0.14 && h < 0.49 && worldDist > 1250) biome = 3; // Swamp
+        else if (bNoise1 > -0.02) biome = 2; // Black Forest
+        else biome = 1; // Meadows
+      } else if (worldDist < 4800) {
+        if (bNoise2 > 0.14 && worldDist > 2600) biome = 5; // Plains
+        else if (bNoise1 < -0.06 && h < 0.52) biome = 3; // Swamp
+        else if (bNoise1 > 0.04) biome = 2; // Black Forest
+        else biome = 1; // Meadows
+      } else if (worldDist < 8200) {
+        if (bNoise2 > 0.06 && worldDist > 5600) biome = 6; // Mistlands
+        else if (bNoise1 > -0.08) biome = 5; // Plains
+        else if (h < 0.50) biome = 3; // Swamp
+        else biome = 2; // Black Forest
+      } else {
+        biome = bNoise2 > -0.05 ? 6 : 5; // Outer Mistlands & Plains
+      }
+
+      biomes[idx] = biome;
+    }
   }
 
-  // Deep North & Ashlands Caps
-  landmasses.push(
-    { wx: (rand() - 0.5) * 600, wz: 8550, rx: 5600, rz: 1600, rot: 0, color: '#e2e8f0' },
-    { wx: (rand() - 0.5) * 600, wz: -8450, rx: 5500, rz: 1550, rot: 0, color: '#991b1b' }
-  );
+  cachedBiomeLookup = biomes;
 
-  return landmasses;
+  // Biome base RGB palettes (matching Valheim's in-game minimap textures)
+  const BIOME_PALETTE = {
+    1: [118, 158, 74],  // Meadows: warm mossy olive-green
+    2: [49, 92, 58],    // Black Forest: deep Nordic pine green
+    3: [84, 66, 48],    // Swamp: murky bog umber-brown
+    4: [158, 168, 180], // Mountains: rocky alpine slate -> snow
+    5: [198, 156, 62],  // Plains: golden-ochre savannah
+    6: [106, 70, 142],  // Mistlands: royal violet-slate crags
+    7: [168, 48, 42],   // Ashlands: charred volcanic crimson
+    8: [216, 228, 240]  // Deep North: glacial snow-blue
+  };
+
+  // Distinct high-contrast border colors for each biome when Biome Borders are enabled
+  const BIOME_BORDER_RGB = {
+    1: [163, 230, 53],  // Meadows border
+    2: [52, 211, 153],  // Black Forest border
+    3: [217, 119, 6],   // Swamp border
+    4: [255, 255, 255], // Mountains border
+    5: [250, 204, 21],  // Plains border
+    6: [216, 180, 254], // Mistlands border
+    7: [248, 113, 113], // Ashlands border
+    8: [186, 230, 253]  // Deep North border
+  };
+
+  // Track biome region centroids for clean cartographic region labels
+  const regionAccum = {};
+
+  // Pass 2: Shade every pixel (ocean depth, beaches, hillshading, tree canopy stippling, and crisp biome boundaries)
+  for (let py = 0; py < TERRAIN_RES; py++) {
+    for (let px = 0; px < TERRAIN_RES; px++) {
+      const idx = py * TERRAIN_RES + px;
+      const pIdx = idx * 4;
+      const nx = (px / (TERRAIN_RES - 1)) * 2.0 - 1.0;
+      const nz = 1.0 - (py / (TERRAIN_RES - 1)) * 2.0;
+      const distNorm = Math.hypot(nx, nz);
+
+      if (distNorm > 1.0) {
+        pixels[pIdx + 3] = 0;
+        continue;
+      }
+
+      const h = heights[idx];
+      const b = biomes[idx];
+
+      // Ocean / Water Shading
+      if (b === 0 || h < seaLevel) {
+        const depth = Math.max(0, Math.min(1, (seaLevel - h) / seaLevel));
+        const wave = noise2D(px * 0.18, py * 0.18) * 6;
+        let r, g, bl;
+        if (depth < 0.08) {
+          // Shallow coastal water shelf
+          const t = depth / 0.08;
+          r = 58 * (1 - t) + 32 * t + wave;
+          g = 122 * (1 - t) + 84 * t + wave;
+          bl = 146 * (1 - t) + 118 * t + wave;
+        } else {
+          // Deep Nordic Sea
+          const t = Math.min(1, (depth - 0.08) / 0.75);
+          r = 32 * (1 - t) + 14 * t + wave * 0.5;
+          g = 84 * (1 - t) + 38 * t + wave * 0.5;
+          bl = 118 * (1 - t) + 64 * t + wave * 0.5;
+        }
+        pixels[pIdx] = Math.max(8, Math.min(255, r));
+        pixels[pIdx + 1] = Math.max(18, Math.min(255, g));
+        pixels[pIdx + 2] = Math.max(32, Math.min(255, bl));
+        pixels[pIdx + 3] = 255;
+        continue;
+      }
+
+      // Compute 3D topographic hillshade from neighboring pixel heights (NW directional sunlight)
+      const hL = px > 0 ? heights[idx - 1] : h;
+      const hR = px < TERRAIN_RES - 1 ? heights[idx + 1] : h;
+      const hU = py > 0 ? heights[idx - TERRAIN_RES] : h;
+      const hD = py < TERRAIN_RES - 1 ? heights[idx + TERRAIN_RES] : h;
+      const dx = (hR - hL) * 18.0;
+      const dy = (hD - hU) * 18.0;
+      const slope = Math.hypot(dx, dy);
+      const hillshade = Math.max(0.58, Math.min(1.36, 1.02 - dx * 0.65 - dy * 0.65));
+
+      const base = BIOME_PALETTE[b] || BIOME_PALETTE[1];
+      let r = base[0];
+      let g = base[1];
+      let bl = base[2];
+
+      // Fine organic texture & tree canopy stippling (matching Screenshot 1's forested islands)
+      const canopy = noise2D(px * 0.38, py * 0.38);
+      const microPatch = noise2D(px * 0.09 + 19.3, py * 0.09 - 11.7);
+
+      if (h < seaLevel + 0.015) {
+        // Sandy / rocky coastal shoreline beach
+        r = 198;
+        g = 178;
+        bl = 136;
+      } else if (b === 1) {
+        // Meadows: grassy clearings + dark olive tree clusters
+        r += microPatch * 18;
+        g += microPatch * 22;
+        bl += microPatch * 10;
+        if (canopy > 0.24 && h > seaLevel + 0.025 && h < 0.56) {
+          r *= 0.66;
+          g *= 0.72;
+          bl *= 0.62;
+        }
+      } else if (b === 2) {
+        // Black Forest: dense dark conifer canopy dots
+        r += microPatch * 12;
+        g += microPatch * 16;
+        bl += microPatch * 10;
+        if (canopy > 0.08) {
+          r *= 0.64;
+          g *= 0.70;
+          bl *= 0.64;
+        }
+      } else if (b === 3) {
+        // Swamp: waterlogged bog pools & dead trees
+        if (microPatch < -0.15) {
+          r = 46;
+          g = 64;
+          bl = 58;
+        } else if (canopy > 0.22) {
+          r *= 0.72;
+          g *= 0.72;
+          bl *= 0.68;
+        }
+      } else if (b === 4) {
+        // Mountains: steep dark slate cliff walls + bright snow-capped peaks
+        if (slope > 0.26 || h < 0.66) {
+          r = 112 + microPatch * 16;
+          g = 118 + microPatch * 16;
+          bl = 128 + microPatch * 18;
+        } else {
+          r = 232 + microPatch * 12;
+          g = 238 + microPatch * 12;
+          bl = 246 + microPatch * 10;
+        }
+      } else if (b === 5) {
+        // Plains: golden heath + birch tree clusters
+        r += microPatch * 20;
+        g += microPatch * 16;
+        bl += microPatch * 8;
+        if (canopy > 0.30) {
+          r *= 0.78;
+          g *= 0.76;
+          bl *= 0.65;
+        }
+      } else if (b === 6) {
+        // Mistlands: jagged dark crags & violet mist valleys
+        r += microPatch * 22;
+        g += microPatch * 14;
+        bl += microPatch * 26;
+        if (canopy > 0.20) {
+          r *= 0.68;
+          g *= 0.65;
+          bl *= 0.74;
+        }
+      }
+
+      // Apply 3D topographic hillshading
+      r *= hillshade;
+      g *= hillshade;
+      bl *= hillshade;
+
+      // Check neighbors for Coastline OR Biome Boundary
+      const bL = px > 0 ? biomes[idx - 1] : b;
+      const bR = px < TERRAIN_RES - 1 ? biomes[idx + 1] : b;
+      const bU = py > 0 ? biomes[idx - TERRAIN_RES] : b;
+      const bD = py < TERRAIN_RES - 1 ? biomes[idx + TERRAIN_RES] : b;
+
+      const isCoastline = bL === 0 || bR === 0 || bU === 0 || bD === 0;
+      const isBiomeEdge =
+        (bL !== 0 && bL !== b) ||
+        (bR !== 0 && bR !== b) ||
+        (bU !== 0 && bU !== b) ||
+        (bD !== 0 && bD !== b);
+
+      if (isCoastline) {
+        // Crisp dark cartographic shoreline
+        r = 36;
+        g = 32;
+        bl = 26;
+      } else if (showBorders && isBiomeEdge) {
+        // Clearly defined Biome Boundary line!
+        const bCol = BIOME_BORDER_RGB[b] || [254, 240, 138];
+        r = bCol[0];
+        g = bCol[1];
+        bl = bCol[2];
+      } else if (showBorders) {
+        // Check 2px neighbor for dark outer casing around biome borders so the border pops against any terrain
+        const bL2 = px > 1 ? biomes[idx - 2] : b;
+        const bR2 = px < TERRAIN_RES - 2 ? biomes[idx + 2] : b;
+        const bU2 = py > 1 ? biomes[idx - TERRAIN_RES * 2] : b;
+        const bD2 = py < TERRAIN_RES - 2 ? biomes[idx + TERRAIN_RES * 2] : b;
+        if (
+          (bL2 !== 0 && bL2 !== b) ||
+          (bR2 !== 0 && bR2 !== b) ||
+          (bU2 !== 0 && bU2 !== b) ||
+          (bD2 !== 0 && bD2 !== b)
+        ) {
+          r *= 0.35;
+          g *= 0.35;
+          bl *= 0.35;
+        }
+      }
+
+      // Accumulate biome sector centroids (quantized into a 4x4 grid of sectors for clean region labels)
+      const secX = Math.floor((px / TERRAIN_RES) * 4);
+      const secY = Math.floor((py / TERRAIN_RES) * 4);
+      const secKey = `${secX}_${secY}_${b}`;
+      if (!regionAccum[secKey]) {
+        regionAccum[secKey] = { b, sumX: 0, sumY: 0, count: 0 };
+      }
+      regionAccum[secKey].sumX += px;
+      regionAccum[secKey].sumY += py;
+      regionAccum[secKey].count++;
+
+      pixels[pIdx] = Math.max(0, Math.min(255, Math.round(r)));
+      pixels[pIdx + 1] = Math.max(0, Math.min(255, Math.round(g)));
+      pixels[pIdx + 2] = Math.max(0, Math.min(255, Math.round(bl)));
+      pixels[pIdx + 3] = 255;
+    }
+  }
+
+  octx.putImageData(imgData, 0, 0);
+
+  // Select significant biome regions for on-map Biome Labels
+  cachedBiomeLabels = Object.values(regionAccum)
+    .filter((reg) => reg.count > 480)
+    .map((reg) => {
+      const avgPx = reg.sumX / reg.count;
+      const avgPy = reg.sumY / reg.count;
+      const wx = ((avgPx / (TERRAIN_RES - 1)) * 2.0 - 1.0) * 10500;
+      const wz = (1.0 - (avgPy / (TERRAIN_RES - 1)) * 2.0) * 10500;
+      return {
+        biomeCode: reg.b,
+        name: (BIOME_NAMES_BY_CODE[reg.b] || 'Meadows').toUpperCase(),
+        wx,
+        wz,
+        count: reg.count
+      };
+    });
+
+  cachedTerrainCanvas = off;
+  return off;
+}
+
+function drawValheimMapIcon(ctx, type, name, x, y) {
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Drop shadow for crisp readability over any terrain (matching Screenshot 1)
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.92)';
+  ctx.shadowBlur = 4;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 1;
+
+  if (type === 'spawn') {
+    // Authentic Valheim Sacrificial Stones icon: Central ring + 5 standing stones around it
+    ctx.fillStyle = '#f8fafc';
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    for (let i = 0; i < 5; i++) {
+      const ang = (i / 5) * Math.PI * 2 - Math.PI / 2;
+      const sx = Math.cos(ang) * 9.5;
+      const sy = Math.sin(ang) * 9.5;
+      ctx.beginPath();
+      ctx.moveTo(sx - 2, sy + 2.5);
+      ctx.lineTo(sx - 1, sy - 3);
+      ctx.lineTo(sx + 1, sy - 3);
+      ctx.lineTo(sx + 2, sy + 2.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (type === 'boss') {
+    // Authentic Valheim Horned Boss Altar icon (like EIKTHYR in Screenshot 1)
+    ctx.fillStyle = '#f8fafc';
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(0, 2, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Left & Right Curved Horns
+    ctx.beginPath();
+    ctx.moveTo(-3, 0);
+    ctx.quadraticCurveTo(-9, -2, -6, -8);
+    ctx.quadraticCurveTo(-4, -3, -2, -1);
+    ctx.moveTo(3, 0);
+    ctx.quadraticCurveTo(9, -2, 6, -8);
+    ctx.quadraticCurveTo(4, -3, 2, -1);
+    ctx.fill();
+    ctx.stroke();
+  } else if (type === 'portal' || type === 'home') {
+    // Authentic Valheim Viking Gable House / Portal icon (like HOME in Screenshot 1)
+    ctx.fillStyle = type === 'portal' ? '#e0f2fe' : '#f8fafc';
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(0, -7);
+    ctx.lineTo(7, -1);
+    ctx.lineTo(5, -1);
+    ctx.lineTo(5, 6);
+    ctx.lineTo(-5, 6);
+    ctx.lineTo(-5, -1);
+    ctx.lineTo(-7, -1);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = type === 'portal' ? '#0284c7' : '#1e293b';
+    ctx.fillRect(-1.8, 1, 3.6, 5);
+  } else if (type === 'tombstone') {
+    // Authentic Valheim Skull & Crossbones death marker (like DAY 3 in Screenshot 1)
+    ctx.fillStyle = '#f8fafc';
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 1.5;
+    // Crossbones
+    ctx.beginPath();
+    ctx.moveTo(-6, -4);
+    ctx.lineTo(6, 5);
+    ctx.moveTo(6, -4);
+    ctx.lineTo(-6, 5);
+    ctx.strokeStyle = '#f8fafc';
+    ctx.lineWidth = 2.4;
+    ctx.stroke();
+    // Skull cranium
+    ctx.strokeStyle = '#0f172a';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.arc(0, -1.5, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    // Eye sockets
+    ctx.fillStyle = '#0f172a';
+    ctx.beginPath();
+    ctx.arc(-1.6, -1.8, 1.1, 0, Math.PI * 2);
+    ctx.arc(1.6, -1.8, 1.1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  if (name) {
+    ctx.font = '700 10px Cinzel, Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.9)';
+    ctx.strokeText(name.toUpperCase(), 0, 16);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(name.toUpperCase(), 0, 16);
+  }
+
+  ctx.restore();
 }
 
 function drawValheimMap() {
@@ -1394,9 +1990,13 @@ function drawValheimMap() {
     y: cy - (wz / worldRadius) * R
   });
 
-  // 1. Deep Ocean Abyss Background
+  // 1. Aged Norse Parchment Table Background outside the world disc
+  const parchmentCanvas = getParchmentCanvas();
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#040811';
+  const parchPat = ctx.createPattern(parchmentCanvas, 'repeat');
+  ctx.fillStyle = parchPat || '#9c845a';
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = 'rgba(12, 16, 24, 0.55)';
   ctx.fillRect(0, 0, w, h);
 
   // Save & clip to circular Valheim world disc
@@ -1405,68 +2005,56 @@ function drawValheimMap() {
   ctx.arc(cx, cy, R, 0, Math.PI * 2);
   ctx.clip();
 
-  // Ocean radial gradient inside world disc
-  const oceanGrad = ctx.createRadialGradient(cx, cy, R * 0.05, cx, cy, R);
-  oceanGrad.addColorStop(0, '#0c2744');
-  oceanGrad.addColorStop(0.7, '#081b33');
-  oceanGrad.addColorStop(1, '#051020');
-  ctx.fillStyle = oceanGrad;
-  ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
+  // 2. Draw High-Resolution 600x600 Pixel Terrain, Coastlines, Forests & Biome Boundaries
+  const terrainCanvas = ensureValheimTerrainCache(wm);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(terrainCanvas, cx - R, cy - R, R * 2, R * 2);
 
-  // 2. Render Procedural Valheim Continents & Biomes (seeded from .fwl seedNumeric)
-  const landmasses = generateSeedContinents(wm.seedNumeric);
-
-  for (const land of landmasses) {
-    const pt = toScreen(land.wx, land.wz);
-    const srx = (land.rx / worldRadius) * R;
-    const srz = (land.rz / worldRadius) * R;
+  // 2b. Render Clean Biome Region Labels when Biome Borders toggle is checked
+  const showBorders = document.getElementById('toggleBiomeBorders')?.checked !== false;
+  if (showBorders && cachedBiomeLabels.length > 0) {
     ctx.save();
-    ctx.translate(pt.x, pt.y);
-    ctx.rotate(land.rot);
-    ctx.beginPath();
-    ctx.ellipse(0, 0, srx, srz, 0, 0, Math.PI * 2);
-    ctx.fillStyle = land.color;
-    ctx.globalAlpha = 0.78;
-    ctx.fill();
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-    ctx.stroke();
+    ctx.font = '700 9.5px Cinzel, Inter, sans-serif';
+    ctx.textAlign = 'center';
+    for (const lbl of cachedBiomeLabels) {
+      if (mapZoom < 1.15 && lbl.count < 850) continue;
+      const pt = toScreen(lbl.wx, lbl.wz);
+      if (pt.x < 20 || pt.x > w - 20 || pt.y < 20 || pt.y > h - 20) continue;
+      ctx.lineWidth = 2.6;
+      ctx.strokeStyle = 'rgba(10, 14, 22, 0.85)';
+      ctx.strokeText(lbl.name, pt.x, pt.y);
+      ctx.fillStyle = 'rgba(254, 249, 195, 0.88)';
+      ctx.fillText(lbl.name, pt.x, pt.y);
+    }
     ctx.restore();
   }
 
-  // Subtle Cartography Coordinate Grid Rings
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
-  ctx.lineWidth = 1;
-  [0.25, 0.5, 0.75].forEach((frac) => {
-    ctx.beginPath();
-    ctx.arc(cx, cy, R * frac, 0, Math.PI * 2);
-    ctx.stroke();
-  });
-
-  // 3. Shared Fog-of-War Overlay (if enabled)
-  const showFog = document.getElementById('toggleFogOfWar')?.checked !== false;
+  // 3. Authentic Valheim Parchment Fog-of-War Overlay (when enabled)
+  const showFog = document.getElementById('toggleFogOfWar')?.checked === true;
   if (showFog) {
     const offCanvas = document.createElement('canvas');
     offCanvas.width = w;
     offCanvas.height = h;
     const fctx = offCanvas.getContext('2d');
 
-    // Fill parchment/dark fog
-    fctx.fillStyle = 'rgba(6, 9, 15, 0.84)';
+    // Fill with warm Valheim parchment texture (matching Screenshot 1!)
+    const fPat = fctx.createPattern(parchmentCanvas, 'repeat');
+    fctx.fillStyle = fPat || '#baa274';
     fctx.fillRect(0, 0, w, h);
 
-    // Punch out discovered zones + active player exploration radii
+    // Punch out discovered zones + active player exploration radii with soft feathered edges
     fctx.globalCompositeOperation = 'destination-out';
     const zones = [...(wm.discoveredZones || [])];
     for (const lp of Object.values(wm.livePlayers || {})) {
-      zones.push({ x: lp.x, z: lp.z, radius: 750 });
+      zones.push({ x: lp.x, z: lp.z, radius: 950 });
     }
 
     for (const z of zones) {
       const pt = toScreen(z.x, z.z);
-      const radPx = Math.max(18, ((z.radius || 750) / worldRadius) * R);
-      const grad = fctx.createRadialGradient(pt.x, pt.y, radPx * 0.35, pt.x, pt.y, radPx);
+      const radPx = Math.max(28, ((z.radius || 950) / worldRadius) * R);
+      const grad = fctx.createRadialGradient(pt.x, pt.y, radPx * 0.55, pt.x, pt.y, radPx);
       grad.addColorStop(0, 'rgba(0,0,0,1)');
+      grad.addColorStop(0.75, 'rgba(0,0,0,0.92)');
       grad.addColorStop(1, 'rgba(0,0,0,0)');
       fctx.fillStyle = grad;
       fctx.beginPath();
@@ -1475,80 +2063,45 @@ function drawValheimMap() {
     }
 
     ctx.drawImage(offCanvas, 0, 0);
-
-    // Draw subtle golden exploration boundary rings
-    ctx.strokeStyle = 'rgba(245, 158, 11, 0.18)';
-    ctx.setLineDash([4, 4]);
-    for (const z of wm.discoveredZones || []) {
-      const pt = toScreen(z.x, z.z);
-      const radPx = ((z.radius || 750) / worldRadius) * R;
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, radPx * 0.85, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    ctx.setLineDash([]);
   }
 
-  // 4. Portal Network Layer
+  // 4. Portal / Home Network Layer
   if (document.getElementById('togglePortals')?.checked !== false) {
     const hub = toScreen(45, 60);
     for (const p of wm.portals || []) {
       const pt = toScreen(p.x, p.z);
-      // Draw Bifrost portal beam to hub
       ctx.save();
       ctx.beginPath();
       ctx.moveTo(hub.x, hub.y);
       ctx.lineTo(pt.x, pt.y);
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.45)';
-      ctx.lineWidth = 1.6;
+      ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 5]);
       ctx.stroke();
       ctx.restore();
 
-      // Portal node
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, 5.5, 0, Math.PI * 2);
-      ctx.fillStyle = '#38bdf8';
-      ctx.fill();
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth = 1.2;
-      ctx.stroke();
+      drawValheimMapIcon(ctx, 'portal', p.tag || 'HOME', pt.x, pt.y);
     }
   }
 
-  // 5. Boss Altars, Traders & Sacrificial Stones
+  // 5. Boss Altars, Traders & Sacrificial Stones (In-Game Style Icons)
   if (document.getElementById('toggleBosses')?.checked !== false) {
-    ctx.font = '12px Inter, sans-serif';
-    ctx.textAlign = 'center';
     for (const lm of wm.landmarks || []) {
       const pt = toScreen(lm.x, lm.z);
-      ctx.fillText(lm.icon || '📍', pt.x, pt.y + 4);
-      if (mapZoom >= 1.15 || lm.type === 'spawn') {
-        ctx.fillStyle = 'rgba(254, 243, 199, 0.88)';
-        ctx.font = '600 10px Inter, sans-serif';
-        ctx.fillText(lm.name, pt.x, pt.y - 9);
-      }
+      const iconType = lm.type === 'spawn' ? 'spawn' : lm.type === 'trader' ? 'home' : 'boss';
+      drawValheimMapIcon(ctx, iconType, lm.name, pt.x, pt.y);
     }
   }
 
-  // 6. Active Death Tombstones
+  // 6. Active Death Tombstones (In-Game Skull & Crossbones Marker)
   if (document.getElementById('toggleTombstones')?.checked !== false) {
     for (const tomb of wm.tombstones || []) {
       const pt = toScreen(tomb.x, tomb.z);
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(239, 68, 68, 0.32)';
-      ctx.fill();
-      ctx.strokeStyle = '#f87171';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      ctx.font = '12px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('💀', pt.x, pt.y + 4);
+      drawValheimMapIcon(ctx, 'tombstone', tomb.player || 'DEATH', pt.x, pt.y);
     }
   }
 
-  // 7. Live Vikings (Movement Trails + Radar Pulse + Live HP Bar + Nameplate)
+  // 7. Live Vikings (Movement Trails + In-Game Golden/Emerald Marker + Live HP Bar + Nameplate)
   const livePlayers = wm.livePlayersList || Object.values(wm.livePlayers || {});
   for (const lp of livePlayers) {
     const pt = toScreen(lp.x, lp.z);
@@ -1561,40 +2114,52 @@ function drawValheimMap() {
         if (idx === 0) ctx.moveTo(tpt.x, tpt.y);
         else ctx.lineTo(tpt.x, tpt.y);
       });
-      ctx.strokeStyle = 'rgba(52, 211, 153, 0.65)';
-      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(250, 204, 21, 0.78)';
+      ctx.lineWidth = 2.2;
       ctx.stroke();
     }
 
-    // Glowing radar halo
+    // Glowing aura
     ctx.beginPath();
     ctx.arc(pt.x, pt.y, 13, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(52, 211, 153, 0.22)';
+    ctx.fillStyle = 'rgba(250, 204, 21, 0.25)';
     ctx.fill();
 
-    // Viking position pin
+    // In-game style Viking directional chevron / pin
+    ctx.save();
+    ctx.translate(pt.x, pt.y);
+    ctx.rotate(((lp.heading || 0) * Math.PI) / 180);
     ctx.beginPath();
-    ctx.arc(pt.x, pt.y, 6, 0, Math.PI * 2);
-    ctx.fillStyle = '#34d399';
+    ctx.moveTo(0, -8);
+    ctx.lineTo(6, 6);
+    ctx.lineTo(0, 3);
+    ctx.lineTo(-6, 6);
+    ctx.closePath();
+    ctx.fillStyle = '#facc15';
     ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = '#0f172a';
     ctx.stroke();
+    ctx.restore();
 
     // Floating Nameplate + Live Health Bar above player
-    const barW = 58;
+    const barW = 60;
     const barH = 5;
     const bx = pt.x - barW / 2;
-    const by = pt.y - 20;
+    const by = pt.y - 21;
 
-    // Name
+    ctx.save();
     ctx.font = '700 11px Inter, sans-serif';
     ctx.textAlign = 'center';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.92)';
+    ctx.strokeText(lp.name, pt.x, by - 4);
     ctx.fillStyle = '#ffffff';
     ctx.fillText(lp.name, pt.x, by - 4);
+    ctx.restore();
 
     // HP Bar Track
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
     ctx.fillRect(bx - 1, by - 1, barW + 2, barH + 2);
 
     // HP Bar Fill
@@ -1608,7 +2173,8 @@ function drawValheimMap() {
   // Outer World Rim Border
   ctx.beginPath();
   ctx.arc(cx, cy, R, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(245, 158, 11, 0.65)';
+  ctx.strokeStyle = 'rgba(217, 179, 114, 0.85)';
+  ctx.lineWidth = 3;
   ctx.stroke();
 }
 
