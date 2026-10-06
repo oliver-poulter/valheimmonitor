@@ -269,8 +269,9 @@ class DockerController {
 
   /**
    * Streams historical + live logs from the valheim-server container
+   * and scans rotated /var/log/supervisor/valheim-server* logs for past sessions
    */
-  attachContainerLogs() {
+  async attachContainerLogs() {
     if (!this.socketAvailable || !this.containerId) return;
     if (this.logStreamReq) {
       try {
@@ -278,10 +279,26 @@ class DockerController {
       } catch (_) {}
     }
 
+    // 1. Scan rotated supervisor logs inside lloesche/valheim-server for historical sessions
+    try {
+      const histOut = await this.execInContainer([
+        'sh',
+        '-c',
+        'grep -hE "Got handshake|Got character ZDOID|Closing socket|Random event set|Saved [0-9]+ ZDOs|World saved|join code|Valheim version" /var/log/supervisor/valheim-server* 2>/dev/null | tail -n 5000 || true'
+      ]);
+      if (histOut) {
+        for (const line of histOut.split(/\r?\n/)) {
+          this.logParser.processLine(line, { isHistorical: true });
+        }
+        this.configManager.saveState();
+      }
+    } catch (_) {}
+
+    // 2. Attach to Docker stdout/stderr stream with 10,000-line history tail
     const req = http.request(
       {
         socketPath: DOCKER_SOCKET,
-        path: `/containers/${this.containerId}/logs?stdout=true&stderr=true&follow=true&tail=400`,
+        path: `/containers/${this.containerId}/logs?stdout=true&stderr=true&follow=true&tail=10000`,
         method: 'GET'
       },
       (res) => {
@@ -290,7 +307,7 @@ class DockerController {
         setTimeout(() => {
           initialBatch = false;
           this.configManager.saveState();
-        }, 2000);
+        }, 3000);
 
         res.on('data', (chunk) => {
           leftover += chunk.toString('utf8');
