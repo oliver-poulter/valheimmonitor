@@ -66,8 +66,8 @@ class DockerController {
         this.currentStatus.mode = 'docker';
         await this.refreshContainerStatus();
         this.attachContainerLogs();
-        if (process.env.AUTO_CONFIGURE_SERVER !== 'false') {
-          // Wait 15s on initial boot so we never race with lloesche/valheim-server's startup valheim-updater
+        if (process.env.AUTO_CONFIGURE_SERVER === 'true') {
+          // Only run on boot if explicitly opted in via AUTO_CONFIGURE_SERVER=true
           setTimeout(() => {
             this.autoConfigureValheimServer({ forceRestart: false }).catch(() => {});
           }, 15000);
@@ -87,6 +87,7 @@ class DockerController {
 
   /**
    * Copies the pre-compiled WatchtowerMapExporter.dll into /config/bepinex/plugins/
+   * (Never touches /config/worlds_local)
    */
   deployBundledBepInExPlugin() {
     try {
@@ -104,10 +105,11 @@ class DockerController {
 
   /**
    * Automatically configures the running lloesche/valheim-server container:
+   * 0. Creates a mandatory world backup via valheim-backup before making any change
    * 1. Installs WatchtowerMapExporter.dll into /config/bepinex/plugins/
    * 2. Enables BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults inside valheim-server
    * 3. Runs /usr/local/bin/bepinex-updater inside valheim-server if BepInEx isn't installed yet
-   * 4. Copies the plugin into /opt/valheim/bepinex/BepInEx/plugins/ and optionally restarts valheim-server
+   * 4. Copies the plugin into /opt/valheim/bepinex/BepInEx/plugins/ and gracefully restarts valheim-server
    */
   async autoConfigureValheimServer({ forceRestart = true } = {}) {
     this.deployBundledBepInExPlugin();
@@ -126,6 +128,9 @@ class DockerController {
       set -e
       mkdir -p /config/bepinex/plugins /config/watchtower
       NEEDS_RESTART=0
+
+      # 0. Take a mandatory safety backup of /config/worlds_local first!
+      supervisorctl start valheim-backup >/dev/null 2>&1 || true
 
       # Wait up to 60s if valheim-updater is currently mid-download on container boot
       for i in $(seq 1 20); do
@@ -174,9 +179,9 @@ class DockerController {
     this.logParser.addEvent({
       type: 'system',
       timestamp,
-      title: 'Auto-Configured Valheim Server for Live Map & Telemetry',
+      title: 'Auto-Configured Valheim Server (Safety Backup Created)',
       detail: out.includes('RESTARTED_WITH_BEPINEX')
-        ? 'Installed BepInEx + WatchtowerMapExporter.dll and restarted valheim-server'
+        ? 'Created safety backup -> Installed BepInEx + WatchtowerMapExporter.dll -> Gracefully restarted'
         : 'Verified BepInEx + WatchtowerMapExporter.dll active'
     });
 
@@ -184,7 +189,7 @@ class DockerController {
       ok: true,
       output: out,
       message: out.includes('RESTARTED_WITH_BEPINEX')
-        ? 'BepInEx & WatchtowerMapExporter.dll installed and valheim-server restarted!'
+        ? 'Safety backup created, BepInEx & WatchtowerMapExporter.dll installed, and server restarted!'
         : 'Server is already configured with BepInEx & WatchtowerMapExporter.dll!'
     };
   }
@@ -457,7 +462,10 @@ class DockerController {
           return { ok: true, message: 'Valheim server container started.' };
 
         case 'stop':
-          // Graceful stop via supervisorctl first so Valheim saves the world
+          // Trigger a backup & graceful stop via supervisorctl so Valheim flushes and backs up the world
+          try {
+            await this.execInContainer(['supervisorctl', 'start', 'valheim-backup']);
+          } catch (_) {}
           try {
             await this.execInContainer(['supervisorctl', 'stop', 'valheim-server']);
           } catch (_) {
@@ -468,12 +476,15 @@ class DockerController {
             type: 'system',
             timestamp,
             title: 'Valheim Server Gracefully Stopped',
-            detail: 'World saved prior to shutdown'
+            detail: 'Backup created & world saved prior to shutdown'
           });
-          return { ok: true, message: 'Valheim server stopped gracefully.' };
+          return { ok: true, message: 'World backed up and Valheim server stopped gracefully.' };
 
         case 'restart':
           this.currentStatus.state = 'restarting';
+          try {
+            await this.execInContainer(['supervisorctl', 'start', 'valheim-backup']);
+          } catch (_) {}
           try {
             await this.execInContainer(['supervisorctl', 'restart', 'valheim-server']);
           } catch (_) {
@@ -484,9 +495,9 @@ class DockerController {
             type: 'system',
             timestamp,
             title: 'Valheim Server Restarted',
-            detail: 'Restarted valheim-server service via supervisorctl'
+            detail: 'Backup created & restarted valheim-server service via supervisorctl'
           });
-          return { ok: true, message: 'Valheim server restarted cleanly via supervisorctl.' };
+          return { ok: true, message: 'World backed up and Valheim server restarted cleanly via supervisorctl.' };
 
         case 'backup':
           await this.execInContainer(['supervisorctl', 'start', 'valheim-backup']);
