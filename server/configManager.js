@@ -36,17 +36,32 @@ class ConfigManager {
     this.state = this.loadState();
   }
 
+  applyOwnership(targetPath) {
+    const puid = Number(process.env.PUID || 0);
+    const pgid = Number(process.env.PGID || 0);
+    try {
+      fs.chmodSync(targetPath, 0o775);
+      if (puid > 0 || pgid > 0) {
+        fs.chownSync(targetPath, puid, pgid);
+      }
+    } catch (_) {}
+  }
+
   ensureDirectories() {
+    // Only create watchtower & bepinex directories (never touch worlds_local!)
     [
       this.configDir,
       this.watchtowerDir,
       this.backupsDir,
-      this.worldsDir,
+      path.join(this.configDir, 'bepinex'),
       this.bepinexConfigDir,
       this.bepinexPluginsDir
     ].forEach((dir) => {
       try {
         fs.mkdirSync(dir, { recursive: true });
+        if (dir !== this.configDir) {
+          this.applyOwnership(dir);
+        }
       } catch (_) {}
     });
 
@@ -62,6 +77,7 @@ class ConfigManager {
       if (!fs.existsSync(fullPath)) {
         try {
           fs.writeFileSync(fullPath, `${header}\n`, 'utf8');
+          this.applyOwnership(fullPath);
         } catch (_) {}
       }
     });

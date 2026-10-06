@@ -94,9 +94,11 @@ class DockerController {
       const bundledDll = path.join(__dirname, '..', 'bepinex-plugin', 'WatchtowerMapExporter.dll');
       const targetDir = this.configManager.bepinexPluginsDir;
       fs.mkdirSync(targetDir, { recursive: true });
+      this.configManager.applyOwnership(targetDir);
       if (fs.existsSync(bundledDll)) {
         const destDll = path.join(targetDir, 'WatchtowerMapExporter.dll');
         fs.copyFileSync(bundledDll, destDll);
+        this.configManager.applyOwnership(destDll);
         return true;
       }
     } catch (_) {}
