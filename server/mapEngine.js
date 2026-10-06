@@ -132,19 +132,35 @@ class ValheimMapEngine {
   }
 
   tickLiveState() {
+    if (this.isDockerMode) {
+      this.inspectRealWorldFiles();
+    }
+
     // 1. Always check if the real BepInEx plugin wrote /config/watchtower/live_map.json
     if (fs.existsSync(this.liveMapFile)) {
       try {
         const externalData = JSON.parse(fs.readFileSync(this.liveMapFile, 'utf8'));
         this.mapState.bepinexTelemetryActive = true;
-        this.ingestExternalTelemetry(externalData, 'BepInEx ZDO Live Telemetry (/config/watchtower/live_map.json)');
+        const pStatus = externalData.pluginStatus || 'active';
+        let statusLabel = '✅ BepInEx ZDO Live Telemetry (/config/watchtower/live_map.json)';
+        if (pStatus === 'configuring_and_restarting_server') {
+          statusLabel = '⏳ BepInEx Installed — Gracefully Restarting Valheim Server (~45-60s)...';
+        } else if (
+          pStatus === 'plugin_loaded_booting_world' ||
+          pStatus === 'waiting_for_assembly_valheim' ||
+          pStatus === 'loading_world_save'
+        ) {
+          statusLabel = '⏳ BepInEx Plugin Loaded — Valheim Server Loading World Save...';
+        }
+        this.mapState.pluginStatus = pStatus;
+        this.ingestExternalTelemetry(externalData, statusLabel);
         return;
       } catch (_) {}
     }
 
     // 2. If running in real Docker mode WITHOUT BepInEx live_map.json:
     if (this.isDockerMode) {
-      this.inspectRealWorldFiles();
+      this.mapState.pluginStatus = 'not_configured';
       const knownPlayers = this.configManager.state.players || {};
       const nextLive = {};
 

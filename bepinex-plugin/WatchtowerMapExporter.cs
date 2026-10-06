@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace HeimdallWatchtower
 {
-    [BepInPlugin("com.watchtower.valheim.mapexporter", "Heimdall Watchtower Map Exporter", "1.1.0")]
+    [BepInPlugin("com.watchtower.valheim.mapexporter", "Heimdall Watchtower Map Exporter", "1.2.0")]
     public class WatchtowerMapExporter : BaseUnityPlugin
     {
         private float _timer;
@@ -33,11 +33,30 @@ namespace HeimdallWatchtower
             try
             {
                 Directory.CreateDirectory("/config/watchtower");
-                Logger.LogInfo("[Heimdall Watchtower] Live Map & Health ZDO Exporter v1.1.0 initialized.");
+                WriteBootstrapStatus("plugin_loaded_booting_world");
+                Logger.LogInfo("[Heimdall Watchtower] Live Map & Health ZDO Exporter v1.2.0 initialized.");
             }
             catch (Exception ex)
             {
                 Logger.LogWarning("[Heimdall Watchtower] Init warning: " + ex.Message);
+            }
+        }
+
+        private void WriteBootstrapStatus(string status)
+        {
+            try
+            {
+                var sb = new StringBuilder();
+                sb.Append("{\n");
+                sb.AppendFormat("  \"pluginStatus\": \"{0}\",\n", EscapeJson(status));
+                sb.Append("  \"pluginVersion\": \"1.2.0\",\n");
+                sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
+                sb.Append("  \"players\": []\n}\n");
+                File.WriteAllText(OutputPath, sb.ToString(), Encoding.UTF8);
+            }
+            catch
+            {
+                // Ignore I/O error if directory not ready
             }
         }
 
@@ -70,14 +89,22 @@ namespace HeimdallWatchtower
         private void ExportWorldAndPlayers()
         {
             ResolveTypes();
-            if (_znetType == null || _zdoManType == null) return;
+            if (_znetType == null || _zdoManType == null)
+            {
+                WriteBootstrapStatus("waiting_for_assembly_valheim");
+                return;
+            }
 
             var znetInstance = _znetType.GetProperty("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null)
                             ?? _znetType.GetField("m_instance", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
             var zdoManInstance = _zdoManType.GetProperty("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null)
                               ?? _zdoManType.GetField("s_instance", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
 
-            if (znetInstance == null || zdoManInstance == null) return;
+            if (znetInstance == null || zdoManInstance == null)
+            {
+                WriteBootstrapStatus("loading_world_save");
+                return;
+            }
 
             string worldName = _znetType.GetMethod("GetWorldName")?.Invoke(znetInstance, null) as string ?? "Dedicated";
             var peersObj = _znetType.GetMethod("GetPeers")?.Invoke(znetInstance, null) as IEnumerable;
@@ -85,6 +112,8 @@ namespace HeimdallWatchtower
 
             var sb = new StringBuilder();
             sb.Append("{\n");
+            sb.Append("  \"pluginStatus\": \"active\",\n");
+            sb.Append("  \"pluginVersion\": \"1.2.0\",\n");
             sb.AppendFormat("  \"worldName\": \"{0}\",\n", EscapeJson(worldName));
             sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
             sb.Append("  \"players\": [\n");

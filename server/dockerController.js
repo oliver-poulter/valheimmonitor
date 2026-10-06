@@ -121,6 +121,7 @@ class DockerController {
       this.currentStatus.autoConfigState = 'configured';
       return {
         ok: true,
+        output: '[Preview Mode] Deployed WatchtowerMapExporter.dll to /config/bepinex/plugins/',
         message: 'Deployed WatchtowerMapExporter.dll to /config/bepinex/plugins/ (Preview Mode).'
       };
     }
@@ -128,52 +129,85 @@ class DockerController {
     this.currentStatus.autoConfigState = 'configuring';
     const setupScript = `
       set -e
+      echo "[1/5] Creating /config/bepinex/plugins and /config/watchtower..."
       mkdir -p /config/bepinex/plugins /config/watchtower
+      chmod -R 777 /config/watchtower /config/bepinex || true
       NEEDS_RESTART=0
 
-      # 0. Take a mandatory safety backup of /config/worlds_local first!
+      echo "[2/5] Creating mandatory safety backup of world save via valheim-backup..."
       supervisorctl start valheim-backup >/dev/null 2>&1 || true
 
-      # Wait up to 60s if valheim-updater is currently mid-download on container boot
-      for i in $(seq 1 20); do
+      # Wait up to 45s if valheim-updater is currently mid-download
+      for i in $(seq 1 15); do
         if [ -f /opt/valheim/server/valheim_server.x86_64 ]; then
           break
         fi
         sleep 3
       done
 
-      # 1. Ensure BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults
-      if ! grep -q "^BEPINEX=true" /usr/local/etc/valheim/defaults 2>/dev/null; then
+      echo "[3/5] Enabling BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults..."
+      if ! grep -q '^export BEPINEX="true"' /usr/local/etc/valheim/defaults 2>/dev/null; then
+        sed -i '/BEPINEX=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
+        sed -i '/STATUS_HTTP=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
         echo "" >> /usr/local/etc/valheim/defaults
-        echo "BEPINEX=true" >> /usr/local/etc/valheim/defaults
-        echo "STATUS_HTTP=true" >> /usr/local/etc/valheim/defaults
+        echo 'export BEPINEX="true"' >> /usr/local/etc/valheim/defaults
+        echo 'export STATUS_HTTP="true"' >> /usr/local/etc/valheim/defaults
         NEEDS_RESTART=1
       fi
 
-      # 2. Download & merge BepInEx into /opt/valheim/bepinex if not yet installed
-      if [ ! -f /opt/valheim/bepinex/valheim_server.x86_64 ]; then
-        export BEPINEX=true
+      echo "[4/5] Checking BepInEx installation in /opt/valheim/bepinex..."
+      export BEPINEX=true
+      if [ ! -f /opt/valheim/bepinex/valheim_server.x86_64 ] || [ ! -d /opt/valheim/bepinex/BepInEx ]; then
+        echo "Downloading & merging BepInEx via /usr/local/bin/bepinex-updater..."
         /usr/local/bin/bepinex-updater || true
         NEEDS_RESTART=1
       fi
 
-      # 3. Ensure WatchtowerMapExporter.dll is linked/copied into active BepInEx plugins folder
-      if [ -d /opt/valheim/bepinex/BepInEx/plugins ] && [ -f /config/bepinex/plugins/WatchtowerMapExporter.dll ]; then
-        if [ ! -f /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll ]; then
-          cp -f /config/bepinex/plugins/WatchtowerMapExporter.dll /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll || true
-          NEEDS_RESTART=1
-        fi
+      mkdir -p /opt/valheim/bepinex/BepInEx/plugins
+      if [ -f /config/bepinex/plugins/WatchtowerMapExporter.dll ]; then
+        cp -f /config/bepinex/plugins/WatchtowerMapExporter.dll /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll || true
+        echo "Installed WatchtowerMapExporter.dll into /opt/valheim/bepinex/BepInEx/plugins/"
       fi
 
+      # Ensure non-root Valheim server user (PUID/PGID) owns BepInEx and can write to /config/watchtower
+      TARGET_UID=\${PUID:-3001}
+      TARGET_GID=\${PGID:-999}
+      chown -R "\$TARGET_UID:\$TARGET_GID" /opt/valheim/bepinex /config/bepinex /config/watchtower 2>/dev/null || true
+      chmod -R 777 /config/watchtower 2>/dev/null || true
+
       if [ "${forceRestart ? '1' : '0'}" = "1" ] || [ "$NEEDS_RESTART" = "1" ]; then
+        echo "[5/5] Gracefully restarting valheim-server with BepInEx enabled..."
         supervisorctl restart valheim-server || true
         echo "RESTARTED_WITH_BEPINEX"
       else
+        echo "[5/5] BepInEx and WatchtowerMapExporter.dll already active."
         echo "ALREADY_CONFIGURED"
       fi
     `;
 
-    const out = await this.execInContainer(['/bin/bash', '-c', setupScript]);
+    // Write immediate bootstrap status to /config/watchtower/live_map.json so UI reflects progress right away
+    try {
+      const liveMapPath = path.join(this.configManager.watchtowerDir, 'live_map.json');
+      fs.writeFileSync(
+        liveMapPath,
+        JSON.stringify(
+          {
+            pluginStatus: 'configuring_and_restarting_server',
+            pluginVersion: '1.2.0',
+            worldName: this.configManager.state.serverMeta.worldName || 'Dedicated',
+            lastUpdated: timestamp,
+            players: []
+          },
+          null,
+          2
+        ),
+        'utf8'
+      );
+      this.configManager.applyOwnership(liveMapPath);
+    } catch (_) {}
+
+    // Allow up to 180s (3 minutes) for backup + BepInEx download + rsync + graceful server restart
+    const out = await this.execInContainer(['/bin/bash', '-c', setupScript], 180000);
     this.currentStatus.autoConfigState = 'configured';
     this.currentStatus.envConfig.BEPINEX = 'true';
     this.currentStatus.envConfig.STATUS_HTTP = 'true';
@@ -191,8 +225,8 @@ class DockerController {
       ok: true,
       output: out,
       message: out.includes('RESTARTED_WITH_BEPINEX')
-        ? 'Safety backup created, BepInEx & WatchtowerMapExporter.dll installed, and server restarted!'
-        : 'Server is already configured with BepInEx & WatchtowerMapExporter.dll!'
+        ? 'Safety backup created, BepInEx & WatchtowerMapExporter.dll installed, and server restarted! (Valheim takes ~45-60s to load the world).'
+        : 'Server is configured with BepInEx & WatchtowerMapExporter.dll!'
     };
   }
 
@@ -368,22 +402,32 @@ class DockerController {
   /**
    * Executes a command inside the valheim-server container via Docker Exec API
    */
-  async execInContainer(cmdArray) {
+  async execInContainer(cmdArray, timeout = 30000) {
     if (!this.socketAvailable || !this.containerId) {
       throw new Error('Docker socket not connected to valheim-server container');
     }
-    const execCreate = await this.dockerRequest('POST', `/containers/${this.containerId}/exec`, {
-      AttachStdout: true,
-      AttachStderr: true,
-      Cmd: cmdArray
-    });
+    const execCreate = await this.dockerRequest(
+      'POST',
+      `/containers/${this.containerId}/exec`,
+      {
+        AttachStdout: true,
+        AttachStderr: true,
+        Cmd: cmdArray
+      },
+      15000
+    );
     if (!execCreate || !execCreate.Id) {
       throw new Error('Failed to create exec instance');
     }
-    const output = await this.dockerRequest('POST', `/exec/${execCreate.Id}/start`, {
-      Detach: false,
-      Tty: true
-    });
+    const output = await this.dockerRequest(
+      'POST',
+      `/exec/${execCreate.Id}/start`,
+      {
+        Detach: false,
+        Tty: true
+      },
+      timeout
+    );
     return typeof output === 'string' ? output.trim() : JSON.stringify(output);
   }
 

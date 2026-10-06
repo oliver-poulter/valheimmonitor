@@ -1192,13 +1192,40 @@ function renderLiveMapAndVitals() {
   if (seedLabel) seedLabel.textContent = wm.seedName || 'Yggdrasil9';
   if (sourceLabel) sourceLabel.textContent = wm.telemetrySource || 'BepInEx ZDO Bridge';
 
+  // Update BepInEx status badge & button text
+  const statusBadge = document.getElementById('bepinexStatusBadge');
+  const autoBtn = document.getElementById('btnAutoConfigureServer');
+  if (statusBadge) {
+    if (wm.bepinexTelemetryActive) {
+      if (wm.pluginStatus === 'active' || !wm.pluginStatus) {
+        statusBadge.textContent = '✅ Plugin Active (2s Live Feed)';
+        statusBadge.className = 'role-badge role-admin';
+        if (autoBtn && !autoBtn.disabled) {
+          autoBtn.textContent = '🔄 Re-Sync / Verify Plugin';
+        }
+      } else {
+        statusBadge.textContent = '⏳ Server Booting World (~45-60s)...';
+        statusBadge.className = 'role-badge role-permitted';
+      }
+    } else {
+      statusBadge.textContent = '⚡ Click Auto-Configure to Enable Live GPS/HP';
+      statusBadge.className = 'role-badge role-permitted';
+    }
+  }
+
   // Render Live Viking Health & Stamina cards
   const vitalsList = document.getElementById('liveVitalsList');
   const livePlayers = wm.livePlayersList || Object.values(wm.livePlayers || {});
 
   if (vitalsList) {
     if (livePlayers.length === 0) {
-      vitalsList.innerHTML = `<div class="viking-meta-line">No Vikings currently in the world.</div>`;
+      const bootHint =
+        wm.bepinexTelemetryActive && wm.pluginStatus && wm.pluginStatus !== 'active'
+          ? 'Valheim Server is currently loading your world save (~45-60s). Live player GPS & HP will appear as soon as a Viking joins!'
+          : wm.bepinexTelemetryActive
+          ? 'BepInEx Live Telemetry is active! Join the server in Valheim to see your live GPS coordinates, Health & Stamina bars.'
+          : 'No Vikings currently online in the world.';
+      vitalsList.innerHTML = `<div class="viking-meta-line">${escapeHtml(bootHint)}</div>`;
     } else {
       vitalsList.innerHTML = livePlayers
         .map((lp) => {
@@ -1294,6 +1321,61 @@ function renderLiveMapAndVitals() {
   drawValheimMap();
 }
 
+function generateSeedContinents(seedNumeric) {
+  let s = (Number(seedNumeric) || 84920177) >>> 0;
+  if (s === 0) s = 84920177;
+  const rand = () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+
+  const landmasses = [
+    // Central Starting Island (Meadows & Black Forest around 0,0)
+    { wx: 0, wz: 0, rx: 920 + rand() * 320, rz: 740 + rand() * 260, rot: (rand() - 0.5) * 1.2, color: '#38a169' },
+    { wx: (rand() - 0.5) * 1100, wz: (rand() - 0.5) * 1100, rx: 720 + rand() * 250, rz: 520 + rand() * 200, rot: (rand() - 0.5) * 1.5, color: '#166534' }
+  ];
+
+  // Inner Ring (Black Forest / Swamp / Mountains)
+  const innerColors = ['#166534', '#5c3a21', '#cbd5e1', '#38a169', '#5c3a21'];
+  for (let i = 0; i < 6; i++) {
+    const angle = (i / 6) * Math.PI * 2 + (rand() - 0.5) * 0.55;
+    const dist = 1600 + rand() * 1400;
+    landmasses.push({
+      wx: Math.cos(angle) * dist,
+      wz: Math.sin(angle) * dist,
+      rx: 750 + rand() * 480,
+      rz: 520 + rand() * 340,
+      rot: (rand() - 0.5) * Math.PI,
+      color: innerColors[i % innerColors.length]
+    });
+  }
+
+  // Outer Ring (Plains & Mistlands)
+  const outerColors = ['#ca8a04', '#6b21a8', '#ca8a04', '#7e22ce', '#ca8a04', '#6b21a8'];
+  for (let i = 0; i < 8; i++) {
+    const angle = (i / 8) * Math.PI * 2 + (rand() - 0.5) * 0.45;
+    const dist = 3600 + rand() * 2600;
+    landmasses.push({
+      wx: Math.cos(angle) * dist,
+      wz: Math.sin(angle) * dist,
+      rx: 950 + rand() * 620,
+      rz: 640 + rand() * 420,
+      rot: (rand() - 0.5) * Math.PI,
+      color: outerColors[i % outerColors.length]
+    });
+  }
+
+  // Deep North & Ashlands Caps
+  landmasses.push(
+    { wx: (rand() - 0.5) * 600, wz: 8550, rx: 5600, rz: 1600, rot: 0, color: '#e2e8f0' },
+    { wx: (rand() - 0.5) * 600, wz: -8450, rx: 5500, rz: 1550, rot: 0, color: '#991b1b' }
+  );
+
+  return landmasses;
+}
+
 function drawValheimMap() {
   const canvas = document.getElementById('valheimMapCanvas');
   if (!canvas || !appState || !appState.worldMap) return;
@@ -1331,30 +1413,8 @@ function drawValheimMap() {
   ctx.fillStyle = oceanGrad;
   ctx.fillRect(cx - R, cy - R, R * 2, R * 2);
 
-  // 2. Render Procedural Valheim Continents & Biomes
-  const landmasses = [
-    // Central Starting Island (Meadows & Black Forest)
-    { wx: 0, wz: 0, rx: 1050, rz: 820, rot: 0.3, color: '#38a169' },
-    { wx: 580, wz: 490, rx: 780, rz: 540, rot: -0.4, color: '#166534' },
-    { wx: -780, wz: 980, rx: 860, rz: 620, rot: 0.5, color: '#166534' },
-    // Swamp & Mountain Chains
-    { wx: 1690, wz: 1460, rx: 950, rz: 680, rot: 0.2, color: '#5c3a21' },
-    { wx: -2080, wz: -1240, rx: 980, rz: 740, rot: -0.5, color: '#cbd5e1' },
-    { wx: 1050, wz: -650, rx: 640, rz: 480, rot: 0.1, color: '#38a169' },
-    // Plains Continents
-    { wx: 2950, wz: -2050, rx: 1250, rz: 840, rot: 0.4, color: '#ca8a04' },
-    { wx: 3920, wz: -2420, rx: 960, rz: 720, rot: -0.2, color: '#ca8a04' },
-    { wx: -3400, wz: 1100, rx: 1050, rz: 690, rot: 0.7, color: '#ca8a04' },
-    // Mistlands Archipelagos
-    { wx: -4850, wz: 3280, rx: 1450, rz: 980, rot: -0.35, color: '#6b21a8' },
-    { wx: -5450, wz: 3720, rx: 920, rz: 680, rot: 0.25, color: '#7e22ce' },
-    { wx: 5200, wz: 2900, rx: 1300, rz: 890, rot: 0.6, color: '#6b21a8' },
-    // Deep North (Frozen North)
-    { wx: 0, wz: 8600, rx: 5800, rz: 1650, rot: 0, color: '#e2e8f0' },
-    // Ashlands (Volcanic South)
-    { wx: 400, wz: -8450, rx: 5600, rz: 1550, rot: 0, color: '#991b1b' },
-    { wx: 1680, wz: -8180, rx: 1200, rz: 780, rot: 0.15, color: '#dc2626' }
-  ];
+  // 2. Render Procedural Valheim Continents & Biomes (seeded from .fwl seedNumeric)
+  const landmasses = generateSeedContinents(wm.seedNumeric);
 
   for (const land of landmasses) {
     const pt = toScreen(land.wx, land.wz);
@@ -1549,26 +1609,60 @@ function drawValheimMap() {
   ctx.beginPath();
   ctx.arc(cx, cy, R, 0, Math.PI * 2);
   ctx.strokeStyle = 'rgba(245, 158, 11, 0.65)';
-  ctx.lineWidth = 2.5;
   ctx.stroke();
 }
 
-
 async function triggerAutoConfigureServer() {
+  const btn = document.getElementById('btnAutoConfigureServer');
+  const logBox = document.getElementById('autoConfigOutputLog');
+  const badge = document.getElementById('bepinexStatusBadge');
+
   try {
-    showToast('⚡ Auto-configuring Valheim Server (installing BepInEx & WatchtowerMapExporter.dll)...');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '⏳ Configuring & Backing Up (~20-45s)...';
+    }
+    if (badge) {
+      badge.textContent = '⏳ Running Auto-Configuration...';
+      badge.className = 'role-badge role-permitted';
+    }
+    if (logBox) {
+      logBox.classList.remove('hidden');
+      logBox.textContent =
+        '⏳ Step 1/5: Creating mandatory world backup via valheim-backup...\n' +
+        '⏳ Step 2/5: Installing BepInEx & WatchtowerMapExporter.dll into valheim-server (takes ~20-45s on first run)...';
+    }
+
+    showToast('⚡ Auto-configuring Valheim Server (creating safety backup & installing BepInEx)...');
     const res = await fetch('/api/server/autoconfigure', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' }
     });
     const data = await res.json();
     if (!data.ok) throw new Error(data.error);
+
+    if (logBox) {
+      logBox.classList.remove('hidden');
+      logBox.textContent =
+        (data.output ? `${data.output}\n\n` : '') +
+        `✅ ${data.message}`;
+    }
+
     if (data.overview) {
       appState = data.overview;
       renderAll();
     }
     showToast(`✅ ${data.message}`);
   } catch (err) {
+    if (logBox) {
+      logBox.classList.remove('hidden');
+      logBox.textContent = `❌ Auto-Configure Error: ${err.message}`;
+    }
     showToast(`❌ Auto-configure error: ${err.message}`);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '🔄 Re-Sync / Verify Plugin';
+    }
   }
 }
