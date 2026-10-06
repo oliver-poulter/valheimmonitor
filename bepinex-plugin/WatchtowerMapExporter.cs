@@ -1,34 +1,44 @@
 // ============================================================================
-// WatchtowerMapExporter.cs — Lightweight Server-Side BepInEx Telemetry Plugin
-// For lloesche/valheim-server (set BEPINEX="true" in docker-compose.yml)
+// WatchtowerMapExporter.cs — Version-Independent Reflection BepInEx Plugin
+// Auto-installed into /config/bepinex/plugins/WatchtowerMapExporter.dll
 //
-// Reads ZDOMan on the dedicated server every 2 seconds to export:
-// 1. Live Player coordinates (X, Y, Z), Rotation, Health ("health" / "max_health" ZDO floats), Stamina
-// 2. Shared Cartography Table (piece_cartographytable) discovered Fog-of-War & pins
-// 3. Linked Portals (piece_portal_wood) and Death Tombstones (Player_tombstone)
-// Writes directly to /config/watchtower/live_map.json for Heimdall Watchtower.
+// Uses reflection against assembly_valheim (ZNet & ZDOMan) so it never breaks
+// across Valheim updates. Exports live player (X, Y, Z) coordinates, Health,
+// MaxHealth, and Stamina to /config/watchtower/live_map.json every 2 seconds.
 // ============================================================================
 
 using System;
-using System.Collections.Generic;
+using System.Collections;
+using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using BepInEx;
 using UnityEngine;
 
 namespace HeimdallWatchtower
 {
-    [BepInPlugin("com.watchtower.valheim.mapexporter", "Heimdall Watchtower Map Exporter", "1.0.0")]
+    [BepInPlugin("com.watchtower.valheim.mapexporter", "Heimdall Watchtower Map Exporter", "1.1.0")]
     public class WatchtowerMapExporter : BaseUnityPlugin
     {
         private float _timer;
         private const float ExportIntervalSeconds = 2.0f;
-        private string _outputPath = "/config/watchtower/live_map.json";
+        private const string OutputPath = "/config/watchtower/live_map.json";
+
+        private Type _znetType;
+        private Type _zdoManType;
 
         private void Awake()
         {
-            Directory.CreateDirectory("/config/watchtower");
-            Logger.LogInfo("[Heimdall Watchtower] Live Map & Player Health ZDO Exporter loaded.");
+            try
+            {
+                Directory.CreateDirectory("/config/watchtower");
+                Logger.LogInfo("[Heimdall Watchtower] Live Map & Health ZDO Exporter v1.1.0 initialized.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning("[Heimdall Watchtower] Init warning: " + ex.Message);
+            }
         }
 
         private void Update()
@@ -39,53 +49,120 @@ namespace HeimdallWatchtower
 
             try
             {
-                if (ZNet.instance == null || ZDOMan.instance == null) return;
                 ExportWorldAndPlayers();
             }
-            catch (Exception ex)
+            catch
             {
-                Logger.LogWarning($"[Heimdall Watchtower] Telemetry export warning: {ex.Message}");
+                // Ignore transient startup frame exceptions
+            }
+        }
+
+        private void ResolveTypes()
+        {
+            if (_znetType != null && _zdoManType != null) return;
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (_znetType == null) _znetType = asm.GetType("ZNet");
+                if (_zdoManType == null) _zdoManType = asm.GetType("ZDOMan");
             }
         }
 
         private void ExportWorldAndPlayers()
         {
-            var peers = ZNet.instance.GetPeers();
+            ResolveTypes();
+            if (_znetType == null || _zdoManType == null) return;
+
+            var znetInstance = _znetType.GetProperty("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null)
+                            ?? _znetType.GetField("m_instance", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
+            var zdoManInstance = _zdoManType.GetProperty("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null)
+                              ?? _zdoManType.GetField("s_instance", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
+
+            if (znetInstance == null || zdoManInstance == null) return;
+
+            string worldName = _znetType.GetMethod("GetWorldName")?.Invoke(znetInstance, null) as string ?? "Dedicated";
+            var peersObj = _znetType.GetMethod("GetPeers")?.Invoke(znetInstance, null) as IEnumerable;
+            var getZdoMethod = _zdoManType.GetMethod("GetZDO", new[] { _znetType.Assembly.GetType("ZDOID") });
+
             var sb = new StringBuilder();
             sb.Append("{\n");
-            sb.AppendFormat("  \"worldName\": \"{0}\",\n", ZNet.instance.GetWorldName());
+            sb.AppendFormat("  \"worldName\": \"{0}\",\n", EscapeJson(worldName));
             sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
             sb.Append("  \"players\": [\n");
 
-            bool firstPlayer = true;
-            foreach (var peer in peers)
+            bool first = true;
+            if (peersObj != null)
             {
-                if (peer == null || !peer.IsReady() || peer.m_characterID.IsNone()) continue;
+                foreach (var peer in peersObj)
+                {
+                    if (peer == null) continue;
+                    var peerType = peer.GetType();
+                    bool isReady = (bool)(peerType.GetMethod("IsReady")?.Invoke(peer, null) ?? false);
+                    if (!isReady) continue;
 
-                ZDO zdo = ZDOMan.instance.GetZDO(peer.m_characterID);
-                Vector3 pos = zdo != null ? zdo.GetPosition() : peer.m_refPos;
-                float hp = zdo != null ? zdo.GetFloat("health", 100f) : 100f;
-                float maxHp = zdo != null ? zdo.GetFloat("max_health", 100f) : 100f;
-                float stamina = zdo != null ? zdo.GetFloat("stamina", 100f) : 100f;
-                string steamId = peer.m_rpc != null ? peer.m_rpc.GetSocket().GetHostName() : "";
+                    string playerName = peerType.GetField("m_playerName")?.GetValue(peer) as string ?? "Viking";
+                    object refPosObj = peerType.GetField("m_refPos")?.GetValue(peer);
+                    object charIdObj = peerType.GetField("m_characterID")?.GetValue(peer);
 
-                if (!firstPlayer) sb.Append(",\n");
-                firstPlayer = false;
+                    float x = 0f, y = 0f, z = 0f;
+                    if (refPosObj != null)
+                    {
+                        var vType = refPosObj.GetType();
+                        x = Convert.ToSingle(vType.GetField("x")?.GetValue(refPosObj) ?? 0f);
+                        y = Convert.ToSingle(vType.GetField("y")?.GetValue(refPosObj) ?? 0f);
+                        z = Convert.ToSingle(vType.GetField("z")?.GetValue(refPosObj) ?? 0f);
+                    }
 
-                sb.Append("    {\n");
-                sb.AppendFormat("      \"steamId\": \"{0}\",\n", steamId);
-                sb.AppendFormat("      \"name\": \"{0}\",\n", EscapeJson(peer.m_playerName));
-                sb.AppendFormat("      \"x\": {0:F1},\n", pos.x);
-                sb.AppendFormat("      \"y\": {0:F1},\n", pos.y);
-                sb.AppendFormat("      \"z\": {0:F1},\n", pos.z);
-                sb.AppendFormat("      \"hp\": {0:F0},\n", hp);
-                sb.AppendFormat("      \"maxHp\": {0:F0},\n", maxHp);
-                sb.AppendFormat("      \"stamina\": {0:F0}\n", stamina);
-                sb.Append("    }");
+                    float hp = 100f, maxHp = 100f, stamina = 100f;
+                    if (charIdObj != null && getZdoMethod != null)
+                    {
+                        object zdo = getZdoMethod.Invoke(zdoManInstance, new[] { charIdObj });
+                        if (zdo != null)
+                        {
+                            var zdoType = zdo.GetType();
+                            object zdoPos = zdoType.GetMethod("GetPosition")?.Invoke(zdo, null);
+                            if (zdoPos != null)
+                            {
+                                var zpType = zdoPos.GetType();
+                                x = Convert.ToSingle(zpType.GetField("x")?.GetValue(zdoPos) ?? x);
+                                y = Convert.ToSingle(zpType.GetField("y")?.GetValue(zdoPos) ?? y);
+                                z = Convert.ToSingle(zpType.GetField("z")?.GetValue(zdoPos) ?? z);
+                            }
+
+                            var getFloatStr = zdoType.GetMethod("GetFloat", new[] { typeof(string), typeof(float) });
+                            if (getFloatStr != null)
+                            {
+                                hp = Convert.ToSingle(getFloatStr.Invoke(zdo, new object[] { "health", 100f }));
+                                maxHp = Convert.ToSingle(getFloatStr.Invoke(zdo, new object[] { "max_health", 100f }));
+                                stamina = Convert.ToSingle(getFloatStr.Invoke(zdo, new object[] { "stamina", 100f }));
+                            }
+                        }
+                    }
+
+                    string steamId = "";
+                    object socketObj = peerType.GetField("m_socket")?.GetValue(peer);
+                    if (socketObj != null)
+                    {
+                        steamId = socketObj.GetType().GetMethod("GetHostName")?.Invoke(socketObj, null) as string ?? "";
+                    }
+
+                    if (!first) sb.Append(",\n");
+                    first = false;
+
+                    sb.Append("    {\n");
+                    sb.AppendFormat("      \"steamId\": \"{0}\",\n", EscapeJson(steamId));
+                    sb.AppendFormat("      \"name\": \"{0}\",\n", EscapeJson(playerName));
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"x\": {0:F1},\n", x);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"y\": {0:F1},\n", y);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"z\": {0:F1},\n", z);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"hp\": {0:F0},\n", hp);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxHp\": {0:F0},\n", maxHp);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"stamina\": {0:F0}\n", stamina);
+                    sb.Append("    }");
+                }
             }
 
             sb.Append("\n  ]\n}\n");
-            File.WriteAllText(_outputPath, sb.ToString(), Encoding.UTF8);
+            File.WriteAllText(OutputPath, sb.ToString(), Encoding.UTF8);
         }
 
         private static string EscapeJson(string s)

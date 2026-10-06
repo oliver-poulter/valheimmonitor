@@ -1,5 +1,6 @@
 const http = require('http');
 const fs = require('fs');
+const path = require('path');
 const { fetchStatusJson, queryA2SInfo, executeRconCommand } = require('./rconClient');
 const { RAID_LORE_MAP } = require('./configManager');
 const { sendDiscordNotification } = require('./discordNotifier');
@@ -25,6 +26,7 @@ class DockerController {
       startedAt: new Date(Date.now() - 4 * 86400 * 1000 - 11 * 3600 * 1000).toISOString(),
       image: 'lloesche/valheim-server:latest',
       containerIp: process.env.VALHEIM_HOST || 'valheim-server',
+      autoConfigState: 'ready',
       cpuPercent: 18.4,
       memoryUsedMb: 3420,
       memoryLimitMb: 8192,
@@ -55,6 +57,7 @@ class DockerController {
   }
 
   async init() {
+    this.deployBundledBepInExPlugin();
     const hasSocket = fs.existsSync(DOCKER_SOCKET);
     if (hasSocket) {
       const found = await this.findValheimContainer();
@@ -63,6 +66,9 @@ class DockerController {
         this.currentStatus.mode = 'docker';
         await this.refreshContainerStatus();
         this.attachContainerLogs();
+        if (process.env.AUTO_CONFIGURE_SERVER !== 'false') {
+          this.autoConfigureValheimServer({ forceRestart: false }).catch(() => {});
+        }
       } else {
         this.setupSimulationMode();
       }
@@ -74,6 +80,102 @@ class DockerController {
     setInterval(() => {
       this.pollMetrics();
     }, 4000);
+  }
+
+  /**
+   * Copies the pre-compiled WatchtowerMapExporter.dll into /config/bepinex/plugins/
+   */
+  deployBundledBepInExPlugin() {
+    try {
+      const bundledDll = path.join(__dirname, '..', 'bepinex-plugin', 'WatchtowerMapExporter.dll');
+      const targetDir = this.configManager.bepinexPluginsDir;
+      fs.mkdirSync(targetDir, { recursive: true });
+      if (fs.existsSync(bundledDll)) {
+        const destDll = path.join(targetDir, 'WatchtowerMapExporter.dll');
+        fs.copyFileSync(bundledDll, destDll);
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  /**
+   * Automatically configures the running lloesche/valheim-server container:
+   * 1. Installs WatchtowerMapExporter.dll into /config/bepinex/plugins/
+   * 2. Enables BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults inside valheim-server
+   * 3. Runs /usr/local/bin/bepinex-updater inside valheim-server if BepInEx isn't installed yet
+   * 4. Copies the plugin into /opt/valheim/bepinex/BepInEx/plugins/ and optionally restarts valheim-server
+   */
+  async autoConfigureValheimServer({ forceRestart = true } = {}) {
+    this.deployBundledBepInExPlugin();
+    const timestamp = new Date().toISOString();
+
+    if (!this.socketAvailable || !this.containerId) {
+      this.currentStatus.autoConfigState = 'configured';
+      return {
+        ok: true,
+        message: 'Deployed WatchtowerMapExporter.dll to /config/bepinex/plugins/ (Preview Mode).'
+      };
+    }
+
+    this.currentStatus.autoConfigState = 'configuring';
+    const setupScript = `
+      set -e
+      mkdir -p /config/bepinex/plugins /config/watchtower
+      NEEDS_RESTART=0
+
+      # 1. Ensure BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults
+      if ! grep -q "^BEPINEX=true" /usr/local/etc/valheim/defaults 2>/dev/null; then
+        echo "" >> /usr/local/etc/valheim/defaults
+        echo "BEPINEX=true" >> /usr/local/etc/valheim/defaults
+        echo "STATUS_HTTP=true" >> /usr/local/etc/valheim/defaults
+        NEEDS_RESTART=1
+      fi
+
+      # 2. Download & merge BepInEx into /opt/valheim/bepinex if not yet installed
+      if [ ! -f /opt/valheim/bepinex/valheim_server.x86_64 ]; then
+        export BEPINEX=true
+        /usr/local/bin/bepinex-updater || true
+        NEEDS_RESTART=1
+      fi
+
+      # 3. Ensure WatchtowerMapExporter.dll is linked/copied into active BepInEx plugins folder
+      if [ -d /opt/valheim/bepinex/BepInEx/plugins ] && [ -f /config/bepinex/plugins/WatchtowerMapExporter.dll ]; then
+        if [ ! -f /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll ]; then
+          cp -f /config/bepinex/plugins/WatchtowerMapExporter.dll /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll || true
+          NEEDS_RESTART=1
+        fi
+      fi
+
+      if [ "${forceRestart ? '1' : '0'}" = "1" ] || [ "$NEEDS_RESTART" = "1" ]; then
+        supervisorctl restart valheim-server || true
+        echo "RESTARTED_WITH_BEPINEX"
+      else
+        echo "ALREADY_CONFIGURED"
+      fi
+    `;
+
+    const out = await this.execInContainer(['/bin/bash', '-c', setupScript]);
+    this.currentStatus.autoConfigState = 'configured';
+    this.currentStatus.envConfig.BEPINEX = 'true';
+    this.currentStatus.envConfig.STATUS_HTTP = 'true';
+
+    this.logParser.addEvent({
+      type: 'system',
+      timestamp,
+      title: 'Auto-Configured Valheim Server for Live Map & Telemetry',
+      detail: out.includes('RESTARTED_WITH_BEPINEX')
+        ? 'Installed BepInEx + WatchtowerMapExporter.dll and restarted valheim-server'
+        : 'Verified BepInEx + WatchtowerMapExporter.dll active'
+    });
+
+    return {
+      ok: true,
+      output: out,
+      message: out.includes('RESTARTED_WITH_BEPINEX')
+        ? 'BepInEx & WatchtowerMapExporter.dll installed and valheim-server restarted!'
+        : 'Server is already configured with BepInEx & WatchtowerMapExporter.dll!'
+    };
   }
 
   /**

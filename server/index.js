@@ -106,6 +106,17 @@ app.post('/api/server/action', async (req, res) => {
   }
 });
 
+// Auto-Configure Valheim Server (Install BepInEx + WatchtowerMapExporter.dll + STATUS_HTTP)
+app.post('/api/server/autoconfigure', async (req, res) => {
+  try {
+    const result = await dockerController.autoConfigureValheimServer({ forceRestart: true });
+    broadcastSSE('state_updated', { action: 'autoconfigure' });
+    res.json({ ...result, overview: buildOverviewPayload() });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
 // Execute Key Commands / RCON / Supervisor Commands
 app.post('/api/command', async (req, res) => {
   try {

@@ -774,13 +774,17 @@
 
             <div class="subpanel-divider"></div>
             <div class="bepinex-bridge-banner">
-              <div class="viking-name-line">🔌 How Live Map & Health Works on <code>lloesche/valheim-server</code></div>
-              <p style="font-size:0.76rem;color:var(--text-secondary);margin-top:0.25rem">
-                Vanilla Valheim stdout logs only emit ZDOIDs on spawn/death. By setting <code>BEPINEX="true"</code> on your
-                <code>lloesche/valheim-server</code> container and dropping the included
-                <code>bepinex-plugin/WatchtowerMapExporter.cs</code> plugin into <code>/config/bepinex/plugins</code>,
-                the server exports live player <code>(X, Y, Z)</code> coordinates, <code>health</code> / <code>max_health</code> ZDO floats,
-                Cartography Table discoveries, portals, and tombstones directly to <code>/config/watchtower/live_map.json</code> every 2s.
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;flex-wrap:wrap">
+                <div class="viking-name-line">⚡ Automatic Server Telemetry Configuration</div>
+                <button class="btn btn-xs btn-amber" onclick="triggerAutoConfigureServer()">
+                  ⚡ Auto-Configure Server Now
+                </button>
+              </div>
+              <p style="font-size:0.76rem;color:var(--text-secondary);margin-top:0.35rem">
+                Watchtower automatically compiles and installs <code>WatchtowerMapExporter.dll</code> into
+                <code>/config/bepinex/plugins/</code>, enables <code>BEPINEX=true</code> &amp; <code>STATUS_HTTP=true</code>
+                inside your <code>lloesche/valheim-server</code> container, and exports live player <code>(X, Y, Z)</code>
+                coordinates &amp; <code>health</code> floats every 2s. Vanilla players can still join without installing any client mods!
               </p>
             </div>
           </div>

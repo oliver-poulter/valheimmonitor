@@ -1552,3 +1552,23 @@ function drawValheimMap() {
   ctx.lineWidth = 2.5;
   ctx.stroke();
 }
+
+
+async function triggerAutoConfigureServer() {
+  try {
+    showToast('⚡ Auto-configuring Valheim Server (installing BepInEx & WatchtowerMapExporter.dll)...');
+    const res = await fetch('/api/server/autoconfigure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error);
+    if (data.overview) {
+      appState = data.overview;
+      renderAll();
+    }
+    showToast(`✅ ${data.message}`);
+  } catch (err) {
+    showToast(`❌ Auto-configure error: ${err.message}`);
+  }
+}
