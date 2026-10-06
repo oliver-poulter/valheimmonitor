@@ -47,32 +47,41 @@ class ValheimMapEngine {
   }
 
   /**
-   * Parses Valheim's binary /config/worlds_local/<WorldName>.fwl file to extract the real World Name & Seed
+   * Parses Valheim's binary /config/worlds_local/<WorldName>.fwl (or <WorldName>/<WorldName>.fwl)
+   * to extract the real World Name & Seed
    */
   inspectRealWorldFiles() {
     try {
       const worldsDir = this.configManager.worldsDir;
       if (!fs.existsSync(worldsDir)) return;
 
-      const files = fs.readdirSync(worldsDir);
-      // Prefer matching WORLD_NAME.fwl, or pick the most recently modified .fwl file
-      const targetWorld = this.configManager.state.serverMeta.worldName || process.env.WORLD_NAME;
-      let fwlFile = files.find((f) => f === `${targetWorld}.fwl`);
-      if (!fwlFile) {
-        const fwlCandidates = files
-          .filter((f) => f.endsWith('.fwl') && !f.includes('.old'))
-          .map((f) => ({ name: f, mtime: fs.statSync(path.join(worldsDir, f)).mtimeMs }))
-          .sort((a, b) => b.mtime - a.mtime);
-        if (fwlCandidates.length > 0) {
-          fwlFile = fwlCandidates[0].name;
+      const fwlPaths = [];
+      for (const entry of fs.readdirSync(worldsDir, { withFileTypes: true })) {
+        const fullPath = path.join(worldsDir, entry.name);
+        if (entry.isFile() && entry.name.endsWith('.fwl') && !entry.name.includes('.old')) {
+          fwlPaths.push({ fullPath, name: entry.name, mtime: fs.statSync(fullPath).mtimeMs });
+        } else if (entry.isDirectory()) {
+          for (const sub of fs.readdirSync(fullPath)) {
+            if (sub.endsWith('.fwl') && !sub.includes('.old')) {
+              const subFull = path.join(fullPath, sub);
+              fwlPaths.push({ fullPath: subFull, name: sub, mtime: fs.statSync(subFull).mtimeMs });
+            }
+          }
         }
       }
 
-      if (fwlFile) {
-        const buf = fs.readFileSync(path.join(worldsDir, fwlFile));
+      const targetWorld = this.configManager.state.serverMeta.worldName || process.env.WORLD_NAME;
+      let match = fwlPaths.find((f) => f.name === `${targetWorld}.fwl`);
+      if (!match && fwlPaths.length > 0) {
+        fwlPaths.sort((a, b) => b.mtime - a.mtime);
+        match = fwlPaths[0];
+      }
+
+      if (match) {
+        const buf = fs.readFileSync(match.fullPath);
         const parsed = this.parseFwlBuffer(buf);
         if (parsed) {
-          this.mapState.worldName = parsed.worldName || fwlFile.replace(/\.fwl$/, '');
+          this.mapState.worldName = parsed.worldName || match.name.replace(/\.fwl$/, '');
           this.mapState.seedName = parsed.seedName || 'Custom Seed';
           this.mapState.seedNumeric = parsed.seedNumeric || 0;
           this.configManager.state.serverMeta.worldName = this.mapState.worldName;

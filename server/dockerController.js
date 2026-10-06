@@ -67,7 +67,10 @@ class DockerController {
         await this.refreshContainerStatus();
         this.attachContainerLogs();
         if (process.env.AUTO_CONFIGURE_SERVER !== 'false') {
-          this.autoConfigureValheimServer({ forceRestart: false }).catch(() => {});
+          // Wait 15s on initial boot so we never race with lloesche/valheim-server's startup valheim-updater
+          setTimeout(() => {
+            this.autoConfigureValheimServer({ forceRestart: false }).catch(() => {});
+          }, 15000);
         }
       } else {
         this.setupSimulationMode();
@@ -123,6 +126,14 @@ class DockerController {
       set -e
       mkdir -p /config/bepinex/plugins /config/watchtower
       NEEDS_RESTART=0
+
+      # Wait up to 60s if valheim-updater is currently mid-download on container boot
+      for i in $(seq 1 20); do
+        if [ -f /opt/valheim/server/valheim_server.x86_64 ]; then
+          break
+        fi
+        sleep 3
+      done
 
       # 1. Ensure BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults
       if ! grep -q "^BEPINEX=true" /usr/local/etc/valheim/defaults 2>/dev/null; then
