@@ -1170,10 +1170,12 @@ function jumpToVikingOnMap(steamId) {
 function estimateClientBiome(x, z) {
   const dist = Math.hypot(x, z);
   if (dist > 10500) return 'World Edge';
+  if (dist < 600) return 'Meadows';
   if (cachedBiomeLookup && cachedBiomeLookup.length === TERRAIN_RES * TERRAIN_RES) {
     const px = Math.max(0, Math.min(TERRAIN_RES - 1, Math.round(((x / 10500 + 1) * 0.5) * (TERRAIN_RES - 1))));
     const py = Math.max(0, Math.min(TERRAIN_RES - 1, Math.round(((1 - z / 10500) * 0.5) * (TERRAIN_RES - 1))));
     const bCode = cachedBiomeLookup[py * TERRAIN_RES + px];
+    if (dist < 1000 && bCode === 4) return 'Black Forest';
     return BIOME_NAMES_BY_CODE[bCode] || 'Ocean';
   }
   if (z < -7200) return 'Ashlands';
@@ -1191,6 +1193,7 @@ function renderLiveMapAndVitals() {
   initMapCanvasInteraction();
 
   const wm = appState.worldMap;
+  ensureValheimTerrainCache(wm);
   const worldLabel = document.getElementById('mapWorldNameLabel');
   const seedLabel = document.getElementById('mapSeedLabel');
   const sourceLabel = document.getElementById('mapTelemetrySourceLabel');
@@ -1237,6 +1240,10 @@ function renderLiveMapAndVitals() {
         .map((lp) => {
           const hpPct = Math.max(5, Math.min(100, Math.round((lp.hp / Math.max(1, lp.maxHp)) * 100)));
           const stamPct = Math.max(5, Math.min(100, Math.round((lp.stamina / Math.max(1, lp.maxStamina)) * 100)));
+          const resolvedBiome =
+            Math.hypot(lp.x || 0, lp.z || 0) < 600
+              ? 'Meadows'
+              : estimateClientBiome(lp.x || 0, lp.z || 0) || lp.biome || 'Meadows';
           const foodsHtml = (lp.foods || [])
             .map((f) => `<span class="food-chip">🍖 ${escapeHtml(f)}</span>`)
             .join('');
@@ -1247,7 +1254,7 @@ function renderLiveMapAndVitals() {
                 <div>
                   <div class="viking-name-line">
                     <span>⚔️ ${escapeHtml(lp.name)}</span>
-                    <span class="role-badge role-permitted">${escapeHtml(lp.biome)}</span>
+                    <span class="role-badge role-permitted">${escapeHtml(resolvedBiome)}</span>
                   </div>
                   <div class="viking-meta-line">
                     📍 X: ${lp.x}, Y: ${lp.y || 20}, Z: ${lp.z} • ${escapeHtml(lp.activity || 'Exploring')}
@@ -1507,6 +1514,8 @@ function ensureValheimTerrainCache(wm) {
         continue;
       }
 
+      const worldDist = distNorm * 10500;
+
       if (srvBiomes && srvHeights && srvBiomes.length === srvSize * srvSize) {
         // Bilinearly sample real WorldGenerator height + biome grid exported from Valheim server
         const gx = ((px + 0.5) / TERRAIN_RES) * (srvSize - 1);
@@ -1531,8 +1540,13 @@ function ensureValheimTerrainCache(wm) {
 
         const nearX = Math.round(gx);
         const nearY = Math.round(gy);
-        const bCode = srvBiomes[nearY * srvSize + nearX];
-        biomes[idx] = heights[idx] < seaLevel ? 0 : bCode || 1;
+        let bCode = srvBiomes[nearY * srvSize + nearX] || 1;
+        // Enforce Valheim spawn biome override: within 550m of (0,0) on land is always Meadows (1), and no Mountains (4) inside 1000m
+        if (heights[idx] >= seaLevel) {
+          if (worldDist < 550) bCode = 1;
+          else if (worldDist < 1000 && bCode === 4) bCode = 2;
+        }
+        biomes[idx] = heights[idx] < seaLevel ? 0 : bCode;
         continue;
       }
 
@@ -1544,29 +1558,34 @@ function ensureValheimTerrainCache(wm) {
       const ridgeNoise = 1.0 - Math.abs(noise2D(warpX * 4.5 + 11.2, warpZ * 4.5 - 7.4));
       const detailNoise = fbm(nx * 14.0, nz * 14.0, 3) * 0.08;
 
-      // Central starting island with organic inner lake/bay (like in-game Valheim starting islands)
-      const startDist = Math.hypot(nx * 1.15, nz * 0.92);
-      let startIslandBias = 0;
-      if (startDist < 0.24) {
-        startIslandBias = (0.24 - startDist) * 1.15;
-        // Carve an organic inner lagoon/lake slightly east of spawn (0,0) while keeping (0,0) dry land
-        const lakeDist = Math.hypot(nx - 0.035, nz + 0.01);
-        if (lakeDist < 0.055 && Math.hypot(nx, nz) > 0.022) {
-          startIslandBias -= (0.055 - lakeDist) * 3.4;
-        }
-      }
-
       // Carve winding river/fjord channels between continents
+      const startDist = Math.hypot(nx * 1.15, nz * 0.92);
       const riverVal = Math.abs(fbm(warpX * 4.2 + 30.0, warpZ * 4.2 - 18.0, 2));
       const riverCarve = riverVal < 0.028 && startDist > 0.06 ? (0.028 - riverVal) * 4.2 : 0;
 
       // Rim drop-off near World Edge
       const rimDrop = distNorm > 0.88 ? (distNorm - 0.88) * 2.2 : 0;
 
-      let h = 0.41 + continentNoise * 0.58 + detailNoise + startIslandBias - riverCarve - rimDrop;
-      if (h > seaLevel + 0.13) {
-        h += Math.pow(ridgeNoise, 2.2) * 0.22;
+      let h = 0.41 + continentNoise * 0.58 + detailNoise - riverCarve - rimDrop;
+      // Only add steep alpine mountain ridges outside the 1000m starting sanctuary
+      if (h > seaLevel + 0.13 && worldDist > 1000) {
+        const ridgeScale = Math.min(1.0, (worldDist - 1000) / 600);
+        h += Math.pow(ridgeNoise, 2.2) * 0.22 * ridgeScale;
       }
+
+      // Central starting island override: ensure gentle rolling Meadows around (0,0) (never submerged & never mountain-peak height)
+      if (startDist < 0.22) {
+        const spawnWeight = Math.min(1.0, (0.22 - startDist) / 0.14);
+        const gentleMeadowHeight = 0.47 + continentNoise * 0.12 + detailNoise * 0.6;
+        h = h * (1.0 - spawnWeight) + gentleMeadowHeight * spawnWeight;
+
+        // Carve an organic inner lagoon/bay slightly east of spawn (0,0) while keeping (0,0) dry Meadows
+        const lakeDist = Math.hypot(nx - 0.042, nz + 0.012);
+        if (lakeDist < 0.048 && Math.hypot(nx, nz) > 0.028) {
+          h -= (0.048 - lakeDist) * 2.8;
+        }
+      }
+
       h = Math.max(0.02, Math.min(0.99, h));
       heights[idx] = h;
 
@@ -1575,20 +1594,25 @@ function ensureValheimTerrainCache(wm) {
         continue;
       }
 
-      // Valheim Biome Assignment Rules (based on world coordinates, elevation, and biome Perlin fields)
+      // Valheim Biome Assignment Rules (matching WorldGenerator.GetBiome distance & altitude constraints)
+      // - Within 600m of (0,0): strictly Meadows (with Black Forest edges only starting > 520m)
+      // - Within 1000m of (0,0): Mountains (biome 4) are forbidden (m_minMountainDistance = 1000m); high terrain stays Meadows/Black Forest
       const bNoise1 = fbm(warpX * 2.4 + 41.0, warpZ * 2.4 - 19.0, 4);
       const bNoise2 = fbm(warpX * 3.1 - 23.0, warpZ * 3.1 + 67.0, 4);
-      const worldDist = distNorm * 10500;
 
       let biome = 1; // Default Meadows
-      if (wz < -7300 + bNoise1 * 650) {
+      if (worldDist < 600) {
+        // Strict spawn sanctuary override: always Meadows near (0,0), with occasional Black Forest pockets only near the outer 520-600m edge
+        biome = worldDist > 520 && bNoise1 > 0.18 ? 2 : 1;
+      } else if (wz < -7300 + bNoise1 * 650) {
         biome = 7; // Ashlands
       } else if (wz > 7300 + bNoise1 * 650) {
         biome = 8; // Deep North
-      } else if (h > 0.67 || (worldDist > 650 && h > 0.61)) {
-        biome = 4; // Mountains (high elevation ridges)
-      } else if (worldDist < 650) {
-        biome = bNoise1 > 0.12 && worldDist > 260 ? 2 : 1; // Meadows around spawn, Black Forest edges
+      } else if (worldDist >= 1000 && (h > 0.66 || (worldDist > 1400 && h > 0.61))) {
+        biome = 4; // Mountains (only allowed >= 1000m from spawn)
+      } else if (worldDist < 1000) {
+        // 600m - 1000m ring: only Meadows and Black Forest allowed (no Mountains or Swamps)
+        biome = bNoise1 > -0.02 || h > 0.56 ? 2 : 1;
       } else if (worldDist < 2100) {
         if (bNoise1 < -0.14 && h < 0.49 && worldDist > 1250) biome = 3; // Swamp
         else if (bNoise1 > -0.02) biome = 2; // Black Forest
@@ -1843,16 +1867,38 @@ function ensureValheimTerrainCache(wm) {
     .map((reg) => {
       const avgPx = reg.sumX / reg.count;
       const avgPy = reg.sumY / reg.count;
+      const cPx = Math.max(0, Math.min(TERRAIN_RES - 1, Math.round(avgPx)));
+      const cPy = Math.max(0, Math.min(TERRAIN_RES - 1, Math.round(avgPy)));
+      const actualBiomeAtCentroid = biomes[cPy * TERRAIN_RES + cPx];
       const wx = ((avgPx / (TERRAIN_RES - 1)) * 2.0 - 1.0) * 10500;
       const wz = (1.0 - (avgPy / (TERRAIN_RES - 1)) * 2.0) * 10500;
       return {
         biomeCode: reg.b,
+        actualBiomeAtCentroid,
         name: (BIOME_NAMES_BY_CODE[reg.b] || 'Meadows').toUpperCase(),
         wx,
         wz,
+        distFromSpawn: Math.hypot(wx, wz),
         count: reg.count
       };
+    })
+    .filter((lbl) => {
+      // Never allow a non-Meadows label inside 750m of Spawn (0,0), and require centroid to sit inside its own biome
+      if (lbl.distFromSpawn < 750 && lbl.biomeCode !== 1) return false;
+      if (lbl.distFromSpawn < 1100 && lbl.biomeCode === 4) return false;
+      return lbl.actualBiomeAtCentroid === lbl.biomeCode;
     });
+
+  // Guarantee a prominent MEADOWS label on the central starting island near spawn
+  if (!cachedBiomeLabels.some((l) => l.biomeCode === 1 && l.distFromSpawn < 700)) {
+    cachedBiomeLabels.unshift({
+      biomeCode: 1,
+      name: 'MEADOWS',
+      wx: 0,
+      wz: -280,
+      count: 1200
+    });
+  }
 
   cachedTerrainCanvas = off;
   return off;

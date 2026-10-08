@@ -291,25 +291,35 @@ class ValheimMapEngine {
         trail.push({ x: Math.round(p.x || 0), z: Math.round(p.z || 0) });
         if (trail.length > 12) trail.shift();
 
+        const px = Math.round(p.x || 0);
+        const pz = Math.round(p.z || 0);
+        const pDist = Math.hypot(px, pz);
+        let resolvedBiome = p.biome || this.estimateBiome(px, pz);
+        if (pDist < 600) {
+          resolvedBiome = 'Meadows';
+        } else if (pDist < 1000 && resolvedBiome.includes('Mountain')) {
+          resolvedBiome = 'Black Forest';
+        }
+
         nextLive[key] = {
           steamId: key,
           name: p.name || 'Viking',
-          x: Math.round(p.x || 0),
+          x: px,
           y: Math.round(p.y || 0),
-          z: Math.round(p.z || 0),
+          z: pz,
           heading: Math.round(p.heading || 0),
           hp: Math.round(p.hp ?? 100),
           maxHp: Math.round(p.maxHp ?? 100),
           stamina: Math.round(p.stamina ?? 100),
           maxStamina: Math.round(p.maxStamina ?? 100),
           eitr: Math.round(p.eitr ?? 0),
-          biome: p.biome || this.estimateBiome(p.x || 0, p.z || 0),
+          biome: resolvedBiome,
           activity: p.activity || 'Exploring',
           foods: p.foods || [],
           trail
         };
 
-        this.recordExplorationPoint(p.x || 0, p.z || 0, p.name || 'Viking');
+        this.recordExplorationPoint(px, pz, p.name || 'Viking');
       }
       this.mapState.livePlayers = nextLive;
     }
@@ -352,6 +362,7 @@ class ValheimMapEngine {
 
   estimateBiome(x, z) {
     const dist = Math.hypot(x, z);
+    if (dist < 600) return 'Meadows';
     if (z < -7200) return 'Ashlands';
     if (z > 7200) return 'Deep North';
     if (dist < 850) return 'Meadows';
