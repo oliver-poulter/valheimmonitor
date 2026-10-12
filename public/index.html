@@ -789,10 +789,12 @@
               </div>
               <p style="font-size:0.76rem;color:var(--text-secondary);margin-top:0.35rem">
                 Watchtower automatically creates a safety backup, installs <code>WatchtowerMapExporter.dll</code> into
-                <code>/config/bepinex/plugins/</code>, enables <code>BEPINEX=true</code> &amp; <code>STATUS_HTTP=true</code>
-                inside your <code>lloesche/valheim-server</code> container, and exports live player <code>(X, Y, Z)</code>
+                <code>/config/bepinex/plugins/</code>, and exports live player <code>(X, Y, Z)</code>
                 coordinates &amp; <code>health</code> floats every 2s. Vanilla players can still join without installing any client mods!
               </p>
+              <div style="font-size:0.75rem;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.3);border-radius:6px;padding:0.45rem 0.65rem;margin-top:0.4rem;color:#fde68a">
+                <strong>📌 Required Compose Setting:</strong> Add <code>- BEPINEX=true</code> under <code>environment:</code> for <code>valheim</code> in your <code>docker-compose.yml</code> so BepInEx runs on server startup!
+              </div>
               <pre class="quick-cmd-output hidden" id="autoConfigOutputLog" style="margin-top:0.6rem;max-height:160px;overflow-y:auto"></pre>
             </div>
           </div>

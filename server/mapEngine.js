@@ -204,15 +204,16 @@ class ValheimMapEngine {
             x: 0,
             y: 20,
             z: 0,
+            hasGps: false,
             heading: 0,
             hp: 25,
             maxHp: 25,
             stamina: 50,
             maxStamina: 50,
-            biome: 'Meadows (Syncing BepInEx ZDO...)',
-            activity: `Online • ZDOID: ${p.lastZdoId || 'Active'}`,
+            biome: 'Awaiting GPS Signal',
+            activity: 'Online (Add BEPINEX=true to docker-compose.yml)',
             foods: [],
-            trail: [{ x: 0, z: 0 }]
+            trail: []
           };
         }
       }

@@ -1238,12 +1238,17 @@ function renderLiveMapAndVitals() {
     } else {
       vitalsList.innerHTML = livePlayers
         .map((lp) => {
+          const hasGps = lp.hasGps !== false;
           const hpPct = Math.max(5, Math.min(100, Math.round((lp.hp / Math.max(1, lp.maxHp)) * 100)));
           const stamPct = Math.max(5, Math.min(100, Math.round((lp.stamina / Math.max(1, lp.maxStamina)) * 100)));
-          const resolvedBiome =
-            Math.hypot(lp.x || 0, lp.z || 0) < 600
-              ? 'Meadows'
-              : estimateClientBiome(lp.x || 0, lp.z || 0) || lp.biome || 'Meadows';
+          const resolvedBiome = hasGps
+            ? (Math.hypot(lp.x || 0, lp.z || 0) < 600
+                ? 'Meadows'
+                : estimateClientBiome(lp.x || 0, lp.z || 0) || lp.biome || 'Meadows')
+            : 'Awaiting BepInEx GPS';
+          const posText = hasGps
+            ? `📍 X: ${lp.x}, Y: ${lp.y || 20}, Z: ${lp.z} • ${escapeHtml(lp.activity || 'Exploring')}`
+            : `📡 Awaiting Live GPS (Add BEPINEX=true to docker-compose.yml)`;
           const foodsHtml = (lp.foods || [])
             .map((f) => `<span class="food-chip">🍖 ${escapeHtml(f)}</span>`)
             .join('');
@@ -1254,15 +1259,17 @@ function renderLiveMapAndVitals() {
                 <div>
                   <div class="viking-name-line">
                     <span>⚔️ ${escapeHtml(lp.name)}</span>
-                    <span class="role-badge role-permitted">${escapeHtml(resolvedBiome)}</span>
+                    <span class="role-badge ${hasGps ? 'role-permitted' : 'role-Modded'}">${escapeHtml(resolvedBiome)}</span>
                   </div>
                   <div class="viking-meta-line">
-                    📍 X: ${lp.x}, Y: ${lp.y || 20}, Z: ${lp.z} • ${escapeHtml(lp.activity || 'Exploring')}
+                    ${posText}
                   </div>
                 </div>
-                <button class="btn btn-xs btn-amber" onclick="focusMapOnCoords(${lp.x}, ${lp.z}, '${escapeAttr(lp.name)}')">
-                  🎯 Track
-                </button>
+                ${
+                  hasGps
+                    ? `<button class="btn btn-xs btn-amber" onclick="focusMapOnCoords(${lp.x}, ${lp.z}, '${escapeAttr(lp.name)}')">🎯 Track</button>`
+                    : `<button class="btn btn-xs btn-glass" onclick="showToast('⚠️ Add BEPINEX=true to docker-compose.yml to enable live GPS!')">📡 No GPS</button>`
+                }
               </div>
 
               <div class="vital-bars-grid">
@@ -2150,6 +2157,7 @@ function drawValheimMap() {
   // 7. Live Vikings (Movement Trails + In-Game Golden/Emerald Marker + Live HP Bar + Nameplate)
   const livePlayers = wm.livePlayersList || Object.values(wm.livePlayers || {});
   for (const lp of livePlayers) {
+    if (lp.hasGps === false) continue; // Do not plot marker at spawn if GPS is inactive!
     const pt = toScreen(lp.x, lp.z);
 
     // Draw breadcrumb movement trail

@@ -18,7 +18,7 @@ using UnityEngine;
 
 namespace HeimdallWatchtower
 {
-    [BepInPlugin("com.watchtower.valheim.mapexporter", "Heimdall Watchtower Map Exporter", "1.4.0")]
+    [BepInPlugin("com.watchtower.valheim.mapexporter", "Heimdall Watchtower Map Exporter", "1.5.0")]
     public class WatchtowerMapExporter : BaseUnityPlugin
     {
         private float _timer;
@@ -336,6 +336,24 @@ namespace HeimdallWatchtower
             return num + num2 * 1566083941;
         }
 
+        private static bool TryExtractVector3(object vecObj, out float x, out float y, out float z)
+        {
+            x = 0f; y = 0f; z = 0f;
+            if (vecObj == null) return false;
+            var t = vecObj.GetType();
+            var fx = t.GetField("x", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            var fy = t.GetField("y", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            var fz = t.GetField("z", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (fx != null && fy != null && fz != null)
+            {
+                x = Convert.ToSingle(fx.GetValue(vecObj));
+                y = Convert.ToSingle(fy.GetValue(vecObj));
+                z = Convert.ToSingle(fz.GetValue(vecObj));
+                return true;
+            }
+            return false;
+        }
+
         private static float ReadZdoFloat(object zdo, string keyName, float defaultVal)
         {
             if (zdo == null) return defaultVal;
@@ -384,6 +402,34 @@ namespace HeimdallWatchtower
             string worldName = _znetType.GetMethod("GetWorldName")?.Invoke(znetInstance, null) as string ?? "Dedicated";
             var peersObj = _znetType.GetMethod("GetPeers")?.Invoke(znetInstance, null) as IEnumerable;
 
+            // Query ZNet.GetPlayerList() as an authoritative coordinate source
+            var playerListPositions = new System.Collections.Generic.Dictionary<string, UnityEngine.Vector3>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var playerListObj = _znetType.GetMethod("GetPlayerList", BindingFlags.Public | BindingFlags.Instance)?.Invoke(znetInstance, null) as IEnumerable;
+                if (playerListObj != null)
+                {
+                    foreach (var pi in playerListObj)
+                    {
+                        if (pi == null) continue;
+                        var piType = pi.GetType();
+                        string piName = piType.GetField("m_name", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pi) as string;
+                        object piPosObj = piType.GetField("m_position", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pi);
+                        if (!string.IsNullOrEmpty(piName) && TryExtractVector3(piPosObj, out float px, out float py, out float pz))
+                        {
+                            if (px != 0f || pz != 0f)
+                            {
+                                playerListPositions[piName] = new UnityEngine.Vector3 { x = px, y = py, z = pz };
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Ignore transient reflection issue with PlayerInfo
+            }
+
             // Find ZDOMan.GetZDO(ZDOID) without depending on which assembly defines struct ZDOID
             MethodInfo getZdoMethod = null;
             foreach (var m in _zdoManType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
@@ -398,7 +444,7 @@ namespace HeimdallWatchtower
             var sb = new StringBuilder();
             sb.Append("{\n");
             sb.Append("  \"pluginStatus\": \"active\",\n");
-            sb.Append("  \"pluginVersion\": \"1.4.0\",\n");
+            sb.Append("  \"pluginVersion\": \"1.5.0\",\n");
             sb.AppendFormat("  \"worldName\": \"{0}\",\n", EscapeJson(worldName));
             sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
             sb.Append("  \"players\": [\n");
@@ -410,20 +456,16 @@ namespace HeimdallWatchtower
                 {
                     if (peer == null) continue;
                     var peerType = peer.GetType();
-                    bool isReady = (bool)(peerType.GetMethod("IsReady")?.Invoke(peer, null) ?? false);
-                    if (!isReady) continue;
 
                     string playerName = peerType.GetField("m_playerName", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(peer) as string ?? "Viking";
-                    object refPosObj = peerType.GetField("m_refPos", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(peer);
+                    object refPosObj = peerType.GetMethod("GetRefPos", BindingFlags.Public | BindingFlags.Instance)?.Invoke(peer, null)
+                                    ?? peerType.GetField("m_refPos", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(peer);
                     object charIdObj = peerType.GetField("m_characterID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(peer);
 
                     float x = 0f, y = 0f, z = 0f;
-                    if (refPosObj != null)
+                    if (TryExtractVector3(refPosObj, out float rx, out float ry, out float rz) && (rx != 0f || rz != 0f))
                     {
-                        var vType = refPosObj.GetType();
-                        x = Convert.ToSingle(vType.GetField("x")?.GetValue(refPosObj) ?? 0f);
-                        y = Convert.ToSingle(vType.GetField("y")?.GetValue(refPosObj) ?? 0f);
-                        z = Convert.ToSingle(vType.GetField("z")?.GetValue(refPosObj) ?? 0f);
+                        x = rx; y = ry; z = rz;
                     }
 
                     string steamId = "";
@@ -442,26 +484,37 @@ namespace HeimdallWatchtower
 
                     if (charIdObj != null && getZdoMethod != null)
                     {
-                        object zdo = getZdoMethod.Invoke(zdoManInstance, new[] { charIdObj });
-                        if (zdo != null)
+                        try
                         {
-                            var zdoType = zdo.GetType();
-                            object zdoPos = zdoType.GetMethod("GetPosition")?.Invoke(zdo, null)
-                                         ?? zdoType.GetField("m_position", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(zdo);
-                            if (zdoPos != null)
+                            object zdo = getZdoMethod.Invoke(zdoManInstance, new[] { charIdObj });
+                            if (zdo != null)
                             {
-                                var zpType = zdoPos.GetType();
-                                x = Convert.ToSingle(zpType.GetField("x")?.GetValue(zdoPos) ?? x);
-                                y = Convert.ToSingle(zpType.GetField("y")?.GetValue(zdoPos) ?? y);
-                                z = Convert.ToSingle(zpType.GetField("z")?.GetValue(zdoPos) ?? z);
-                            }
+                                var zdoType = zdo.GetType();
+                                object zdoPos = zdoType.GetMethod("GetPosition", Type.EmptyTypes)?.Invoke(zdo, null)
+                                             ?? zdoType.GetMethod("GetPosition")?.Invoke(zdo, null)
+                                             ?? zdoType.GetField("m_position", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(zdo);
+                                if (TryExtractVector3(zdoPos, out float zx, out float zy, out float zz) && (zx != 0f || zz != 0f))
+                                {
+                                    x = zx; y = zy; z = zz;
+                                }
 
-                            rawHp = ReadZdoFloat(zdo, "health", -1f);
-                            rawMaxHp = ReadZdoFloat(zdo, "max_health", -1f);
-                            rawStamina = ReadZdoFloat(zdo, "stamina", -1f);
-                            rawMaxStamina = ReadZdoFloat(zdo, "max_stamina", -1f);
-                            zdoNoise = ReadZdoFloat(zdo, "noise", 0f);
+                                rawHp = ReadZdoFloat(zdo, "health", -1f);
+                                rawMaxHp = ReadZdoFloat(zdo, "max_health", -1f);
+                                rawStamina = ReadZdoFloat(zdo, "stamina", -1f);
+                                rawMaxStamina = ReadZdoFloat(zdo, "max_stamina", -1f);
+                                zdoNoise = ReadZdoFloat(zdo, "noise", 0f);
+                            }
                         }
+                        catch
+                        {
+                            // Ignore transient ZDO error
+                        }
+                    }
+
+                    // Fallback to GetPlayerList if peer position is (0, 0)
+                    if (x == 0f && z == 0f && playerListPositions.TryGetValue(playerName, out var pPos))
+                    {
+                        x = pPos.x; y = pPos.y; z = pPos.z;
                     }
 
                     // Resolve real Health & MaxHealth (Valheim base unfed health is 25 HP)
