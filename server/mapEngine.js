@@ -82,22 +82,30 @@ class ValheimMapEngine {
    */
   inspectRealWorldFiles() {
     try {
-      const worldsDir = this.configManager.worldsDir;
-      if (!fs.existsSync(worldsDir)) return;
+      const candidateDirs = [
+        this.configManager.worldsDir,
+        path.join(this.configManager.configDir, 'worlds'),
+        path.join(this.configManager.configDir, 'worlds_local'),
+        this.configManager.configDir
+      ].filter((d, idx, arr) => d && fs.existsSync(d) && arr.indexOf(d) === idx);
 
       const fwlPaths = [];
-      for (const entry of fs.readdirSync(worldsDir, { withFileTypes: true })) {
-        const fullPath = path.join(worldsDir, entry.name);
-        if (entry.isFile() && entry.name.endsWith('.fwl') && !entry.name.includes('.old')) {
-          fwlPaths.push({ fullPath, name: entry.name, mtime: fs.statSync(fullPath).mtimeMs });
-        } else if (entry.isDirectory()) {
-          for (const sub of fs.readdirSync(fullPath)) {
-            if (sub.endsWith('.fwl') && !sub.includes('.old')) {
-              const subFull = path.join(fullPath, sub);
-              fwlPaths.push({ fullPath: subFull, name: sub, mtime: fs.statSync(subFull).mtimeMs });
+      for (const dir of candidateDirs) {
+        try {
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isFile() && entry.name.endsWith('.fwl') && !entry.name.includes('.old')) {
+              fwlPaths.push({ fullPath, name: entry.name, mtime: fs.statSync(fullPath).mtimeMs });
+            } else if (entry.isDirectory() && entry.name !== 'backups' && entry.name !== 'bepinex' && entry.name !== 'watchtower') {
+              for (const sub of fs.readdirSync(fullPath)) {
+                if (sub.endsWith('.fwl') && !sub.includes('.old')) {
+                  const subFull = path.join(fullPath, sub);
+                  fwlPaths.push({ fullPath: subFull, name: sub, mtime: fs.statSync(subFull).mtimeMs });
+                }
+              }
             }
           }
-        }
+        } catch (_) {}
       }
 
       const targetWorld = this.configManager.state.serverMeta.worldName || process.env.WORLD_NAME;
