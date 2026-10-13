@@ -3,7 +3,38 @@ let allLogs = [];
 let activeEventFilter = 'all';
 let activeLogFilter = 'all';
 
+// Audio SFX state
+let audioCtx = null;
+let audioFxEnabled = localStorage.getItem('heimdall_sfx') === 'true';
+
+// Theme state
+const THEMES = ['mead', 'bifrost', 'frost', 'ember'];
+const THEME_LABELS = {
+  mead: 'Mead Gold',
+  bifrost: 'Bifrost',
+  frost: 'Frost',
+  ember: 'Ember'
+};
+
+// Roster Table Sort state
+let currentRosterSortCol = 'playtime';
+let currentRosterSortAsc = false;
+
+// Command History state
+let commandHistory = [];
+let historyIndex = -1;
+
+// Log Stream Controls
+let logAutoscroll = true;
+let logStreamPaused = false;
+
+// Command Palette State
+let paletteItems = [];
+let paletteSelectedIndex = 0;
+
 document.addEventListener('DOMContentLoaded', () => {
+  initTheme();
+  updateAudioUi();
   fetchOverview();
   fetchLogs();
   connectSSE();
@@ -14,7 +45,49 @@ document.addEventListener('DOMContentLoaded', () => {
     copyBtn.addEventListener('click', () => {
       const code = document.getElementById('headerJoinCode').textContent;
       navigator.clipboard?.writeText(code);
+      playSfx('copy');
+      const badge = document.getElementById('joinCodeCopyBadge');
+      if (badge) {
+        badge.textContent = 'COPIED!';
+        setTimeout(() => { badge.textContent = 'Copy'; }, 2000);
+      }
       showToast(`🔑 Copied PlayFab Crossplay Join Code: ${code}`);
+    });
+  }
+
+  // Global keybindings (Ctrl+K / Cmd+K for Command Palette)
+  window.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+      e.preventDefault();
+      openCommandPalette();
+    } else if (e.key === 'Escape') {
+      closeCommandPalette();
+    }
+  });
+
+  // Terminal command history navigation
+  const termInput = document.getElementById('terminalCommandInput');
+  if (termInput) {
+    termInput.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowUp') {
+        if (commandHistory.length > 0) {
+          if (historyIndex === -1) historyIndex = commandHistory.length - 1;
+          else if (historyIndex > 0) historyIndex--;
+          termInput.value = commandHistory[historyIndex];
+        }
+        e.preventDefault();
+      } else if (e.key === 'ArrowDown') {
+        if (commandHistory.length > 0 && historyIndex !== -1) {
+          if (historyIndex < commandHistory.length - 1) {
+            historyIndex++;
+            termInput.value = commandHistory[historyIndex];
+          } else {
+            historyIndex = -1;
+            termInput.value = '';
+          }
+        }
+        e.preventDefault();
+      }
     });
   }
 
@@ -27,6 +100,107 @@ document.addEventListener('DOMContentLoaded', () => {
   }, 15000);
 });
 
+/* --------------------------------------------------------------------------
+   THEME & AUDIO ENGINES
+   -------------------------------------------------------------------------- */
+function initTheme() {
+  const saved = localStorage.getItem('heimdall_theme') || 'mead';
+  setTheme(saved, false);
+}
+
+function setTheme(theme, playSound = true) {
+  if (!THEMES.includes(theme)) theme = 'mead';
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('heimdall_theme', theme);
+
+  const label = document.getElementById('themeNameLabel');
+  if (label) label.textContent = THEME_LABELS[theme] || 'Mead Gold';
+
+  const dot = document.getElementById('themeIndicatorDot');
+  if (dot) {
+    if (theme === 'mead') dot.style.background = '#f59e0b';
+    else if (theme === 'bifrost') dot.style.background = '#10b981';
+    else if (theme === 'frost') dot.style.background = '#38bdf8';
+    else if (theme === 'ember') dot.style.background = '#f97316';
+  }
+
+  if (playSound) {
+    playSfx('click');
+    showToast(`🎨 Nordic Aura Theme: ${THEME_LABELS[theme]}`);
+  }
+}
+
+function cycleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || 'mead';
+  const idx = THEMES.indexOf(current);
+  const next = THEMES[(idx + 1) % THEMES.length];
+  setTheme(next, true);
+}
+
+function toggleAudioFx() {
+  audioFxEnabled = !audioFxEnabled;
+  localStorage.setItem('heimdall_sfx', audioFxEnabled ? 'true' : 'false');
+  updateAudioUi();
+  if (audioFxEnabled) playSfx('copy');
+  showToast(audioFxEnabled ? '🔊 Atmospheric Audio SFX Enabled' : '🔇 Audio SFX Muted');
+}
+
+function updateAudioUi() {
+  const icon = document.getElementById('audioToggleIcon');
+  if (icon) icon.textContent = audioFxEnabled ? '🔊' : '🔇';
+}
+
+function playSfx(type) {
+  if (!audioFxEnabled) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    if (type === 'click') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(440, now);
+      osc.frequency.exponentialRampToValueAtTime(160, now + 0.05);
+      gain.gain.setValueAtTime(0.08, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+      osc.start(now);
+      osc.stop(now + 0.05);
+    } else if (type === 'copy') {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(523.25, now);
+      osc.frequency.setValueAtTime(659.25, now + 0.07);
+      osc.frequency.setValueAtTime(783.99, now + 0.14);
+      gain.gain.setValueAtTime(0.09, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+      osc.start(now);
+      osc.stop(now + 0.28);
+    } else if (type === 'horn') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(220, now);
+      osc.frequency.linearRampToValueAtTime(277.18, now + 0.18);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+      osc.start(now);
+      osc.stop(now + 0.45);
+    } else if (type === 'save') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(329.63, now);
+      osc.frequency.linearRampToValueAtTime(440, now + 0.15);
+      gain.gain.setValueAtTime(0.09, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+      osc.start(now);
+      osc.stop(now + 0.3);
+    }
+  } catch (_) {}
+}
+
+/* --------------------------------------------------------------------------
+   API FETCHING & SSE
+   -------------------------------------------------------------------------- */
 async function fetchOverview() {
   try {
     const res = await fetch('/api/overview');
@@ -51,16 +225,17 @@ function connectSSE() {
   const es = new EventSource('/api/stream');
 
   es.addEventListener('open', () => {
-    // Reconnected after server restart or network hiccup; refresh full state
     fetchOverview();
   });
 
   es.addEventListener('log', (e) => {
     try {
       const entry = JSON.parse(e.data);
-      allLogs.push(entry);
-      if (allLogs.length > 400) allLogs.shift();
-      renderLogStream();
+      if (!logStreamPaused) {
+        allLogs.push(entry);
+        if (allLogs.length > 500) allLogs.shift();
+        renderLogStream();
+      }
     } catch (_) {}
   });
 
@@ -75,7 +250,6 @@ function connectSSE() {
         appState.container = payload.container;
         appState.telemetryHistory = payload.telemetryHistory;
         if (payload.worldMap) {
-          // Preserve existing terrainGrid if the telemetry stream omitted it for bandwidth optimization
           const existingGrid = appState.worldMap?.terrainGrid;
           appState.worldMap = {
             ...appState.worldMap,
@@ -93,6 +267,7 @@ function connectSSE() {
 }
 
 function switchTab(tabId) {
+  playSfx('click');
   document.querySelectorAll('.nav-tab').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.tab === tabId);
   });
@@ -101,6 +276,8 @@ function switchTab(tabId) {
   });
   if (tabId === 'map') {
     setTimeout(() => drawValheimMap(), 30);
+  } else if (tabId === 'settings') {
+    updateDiscordEmbedPreview();
   }
 }
 
@@ -117,8 +294,13 @@ function renderAll() {
   renderActiveModsList();
   populateSettingsAndModifiers();
   renderLiveMapAndVitals();
+  updateActiveRaidAlarmBanner();
+  updateDiscordEmbedPreview();
 }
 
+/* --------------------------------------------------------------------------
+   HEADER & KPIS RENDERING
+   -------------------------------------------------------------------------- */
 function renderHeaderAndKpis() {
   const { container, serverMeta, players, totalDeaths, backups } = appState;
   const onlinePlayers = players.filter((p) => p.online);
@@ -135,7 +317,7 @@ function renderHeaderAndKpis() {
   statusBadge.className = 'status-pill';
   if (container.state === 'running') {
     statusBadge.classList.add('status-running');
-    statusText.textContent = 'ONLINE • RUNNING';
+    statusText.textContent = 'ONLINE';
   } else if (container.state === 'restarting') {
     statusBadge.classList.add('status-restarting');
     statusText.textContent = 'RESTARTING...';
@@ -147,7 +329,7 @@ function renderHeaderAndKpis() {
   // Connection mode badge
   const modeBadge = document.getElementById('connectionModeBadge');
   modeBadge.textContent =
-    container.mode === 'docker' ? '🐳 Docker Socket Connected' : '⚡ Interactive Preview Mode';
+    container.mode === 'docker' ? '🐳 Docker Socket' : '⚡ Interactive Preview';
 
   // Counters
   document.getElementById('navOnlineCounter').textContent = onlinePlayers.length;
@@ -159,6 +341,12 @@ function renderHeaderAndKpis() {
     onlinePlayers.length > 0
       ? onlinePlayers.map((p) => p.name).join(', ')
       : 'No Vikings currently connected';
+
+  const onlineFill = document.getElementById('kpiOnlineFill');
+  if (onlineFill) {
+    const pct = Math.min(100, Math.round((onlinePlayers.length / 10) * 100));
+    onlineFill.style.width = `${pct}%`;
+  }
 
   // KPI 2: Known Vikings & Sessions
   const totalSessions = players.reduce((acc, p) => acc + (p.sessionsCount || 0), 0);
@@ -186,6 +374,9 @@ function renderHeaderAndKpis() {
     `Net RX: ${container.netRxMb || 0} MB • TX: ${container.netTxMb || 0} MB`;
 }
 
+/* --------------------------------------------------------------------------
+   ACTIVE VIKINGS RENDERING
+   -------------------------------------------------------------------------- */
 function renderActiveVikings() {
   const container = document.getElementById('activePlayersContainer');
   if (!container || !appState) return;
@@ -201,7 +392,7 @@ function renderActiveVikings() {
         <span class="event-icon">🌙</span>
         <div class="event-body">
           <div class="event-title">The Mead Hall is Quiet</div>
-          <div class="event-detail">No Vikings are currently logged in. Click "+ Simulate Join" above to test live player detection.</div>
+          <div class="event-detail">No Vikings are currently logged in. Click "Sandbox Testing" above to test live event detection.</div>
         </div>
       </div>
     `;
@@ -249,7 +440,7 @@ function renderActiveVikings() {
           <div class="viking-actions">
             ${
               liveTelemetry
-                ? `<button class="btn btn-xs btn-glass" onclick="jumpToVikingOnMap('${escapeAttr(p.steamId)}')" title="Track Viking on Live Map">🗺️ Locate</button>`
+                ? `<button class="btn btn-xs btn-amber" onclick="jumpToVikingOnMap('${escapeAttr(p.steamId)}')" title="Track Viking on Live Map">🗺️ Locate</button>`
                 : ''
             }
             ${
@@ -266,6 +457,9 @@ function renderActiveVikings() {
     .join('');
 }
 
+/* --------------------------------------------------------------------------
+   TELEMETRY & CHARTS RENDERING
+   -------------------------------------------------------------------------- */
 function renderChartsAndSupervisor() {
   const { container, telemetryHistory, worldSaves } = appState;
 
@@ -286,7 +480,7 @@ function renderChartsAndSupervisor() {
   const services = container.supervisorServices || [];
   const strip = document.getElementById('supervisorServicesStrip');
   document.getElementById('supervisorSummaryBadge').textContent =
-    `${services.length} Supervisor Programs Managed`;
+    `${services.length} Programs Managed`;
 
   strip.innerHTML = services
     .map((svc) => {
@@ -334,8 +528,12 @@ function renderSparklineSvg(svgId, values, strokeColor, maxScale) {
   `;
 }
 
+/* --------------------------------------------------------------------------
+   CHRONICLE FEED & FILTERS
+   -------------------------------------------------------------------------- */
 function setEventFilter(filter, btn) {
   activeEventFilter = filter;
+  playSfx('click');
   document.querySelectorAll('#eventFilterPills .pill').forEach((p) => p.classList.remove('active'));
   if (btn) btn.classList.add('active');
   renderChronicleFeed();
@@ -382,6 +580,20 @@ function renderChronicleFeed() {
     .join('');
 }
 
+/* --------------------------------------------------------------------------
+   VIKING ROSTER & TABLE SORTING / EXPORT
+   -------------------------------------------------------------------------- */
+function sortVikingTable(col) {
+  if (currentRosterSortCol === col) {
+    currentRosterSortAsc = !currentRosterSortAsc;
+  } else {
+    currentRosterSortCol = col;
+    currentRosterSortAsc = (col === 'name');
+  }
+  playSfx('click');
+  renderPlayersTable();
+}
+
 function renderPlayersTable() {
   const tbody = document.getElementById('vikingRosterBody');
   if (!tbody || !appState) return;
@@ -393,12 +605,66 @@ function renderPlayersTable() {
   const permittedIds = new Set((appState.accessLists?.permitted || []).map((a) => a.steamId));
   const bannedIds = new Set((appState.accessLists?.banned || []).map((a) => a.steamId));
 
+  // Compute Roster Summary stats
+  const totalVikingsVal = document.getElementById('rosterTotalVikingsVal');
+  const onlineVal = document.getElementById('rosterOnlineVal');
+  const deathsVal = document.getElementById('rosterDeathsVal');
+  const topJarlVal = document.getElementById('rosterTopJarlVal');
+
+  if (totalVikingsVal) totalVikingsVal.textContent = appState.players.length;
+  if (onlineVal) onlineVal.textContent = appState.players.filter((p) => p.online).length;
+  if (deathsVal) {
+    const totDeaths = appState.players.reduce((acc, p) => acc + (p.deathsCount || 0), 0);
+    deathsVal.textContent = `${totDeaths} 💀`;
+  }
+  if (topJarlVal) {
+    const sortedByPlaytime = [...appState.players].sort((a, b) => (b.totalPlaytimeSeconds || 0) - (a.totalPlaytimeSeconds || 0));
+    topJarlVal.textContent = sortedByPlaytime[0]?.name || 'Ragnar Lothbrok';
+  }
+
   const filtered = (appState.players || []).filter((p) => {
     if (query && !p.name.toLowerCase().includes(query) && !p.steamId.includes(query)) return false;
     if (filter === 'online' && !p.online) return false;
     if (filter === 'offline' && p.online) return false;
     if (filter === 'admin' && !adminIds.has(p.steamId)) return false;
     return true;
+  });
+
+  // Sorting
+  filtered.sort((a, b) => {
+    let cmp = 0;
+    if (currentRosterSortCol === 'name') {
+      cmp = a.name.localeCompare(b.name);
+    } else if (currentRosterSortCol === 'status') {
+      cmp = (a.online ? 1 : 0) - (b.online ? 1 : 0);
+    } else if (currentRosterSortCol === 'lastSeen') {
+      cmp = new Date(a.lastSeen || 0) - new Date(b.lastSeen || 0);
+    } else if (currentRosterSortCol === 'playtime') {
+      const curA = a.online && a.currentSessionStart ? (Date.now() - new Date(a.currentSessionStart).getTime()) / 1000 : 0;
+      const curB = b.online && b.currentSessionStart ? (Date.now() - new Date(b.currentSessionStart).getTime()) / 1000 : 0;
+      cmp = ((a.totalPlaytimeSeconds || 0) + curA) - ((b.totalPlaytimeSeconds || 0) + curB);
+    } else if (currentRosterSortCol === 'sessions') {
+      cmp = (a.sessionsCount || 0) - (b.sessionsCount || 0);
+    } else if (currentRosterSortCol === 'deaths') {
+      cmp = (a.deathsCount || 0) - (b.deathsCount || 0);
+    }
+    return currentRosterSortAsc ? cmp : -cmp;
+  });
+
+  // Update table header sort arrows
+  ['name', 'status', 'lastSeen', 'playtime', 'sessions', 'deaths'].forEach((col) => {
+    const ind = document.getElementById(`sort-${col}`);
+    if (ind) {
+      if (col === currentRosterSortCol) {
+        ind.textContent = currentRosterSortAsc ? '▲' : '▼';
+        ind.style.opacity = '1';
+        ind.style.color = 'var(--amber)';
+      } else {
+        ind.textContent = '▲▼';
+        ind.style.opacity = '0.4';
+        ind.style.color = 'inherit';
+      }
+    }
   });
 
   tbody.innerHTML = filtered
@@ -483,6 +749,51 @@ function renderPlayersTable() {
     .join('');
 }
 
+function exportVikingRosterCsv() {
+  if (!appState || !appState.players) return;
+  const headers = ['Viking Name', 'SteamID64', 'Online', 'Total Playtime (Seconds)', 'Total Playtime (Hours)', 'Sessions', 'Deaths', 'Last Seen', 'First Seen'];
+  const rows = appState.players.map((p) => [
+    `"${(p.name || '').replace(/"/g, '""')}"`,
+    `"${p.steamId}"`,
+    p.online ? 'Online' : 'Offline',
+    p.totalPlaytimeSeconds || 0,
+    ((p.totalPlaytimeSeconds || 0) / 3600).toFixed(2),
+    p.sessionsCount || 1,
+    p.deathsCount || 0,
+    `"${p.lastSeen || ''}"`,
+    `"${p.firstSeen || ''}"`
+  ]);
+  const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `heimdall-viking-roster-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  showToast('📥 Exported Viking roster to CSV');
+  playSfx('copy');
+}
+
+function exportVikingRosterJson() {
+  if (!appState || !appState.players) return;
+  const jsonContent = JSON.stringify(appState.players, null, 2);
+  const blob = new Blob([jsonContent], { type: 'application/json;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `heimdall-viking-roster-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  showToast('📥 Exported Viking roster to JSON');
+  playSfx('copy');
+}
+
+/* --------------------------------------------------------------------------
+   RAIDS CATALOG & RECENT HISTORY
+   -------------------------------------------------------------------------- */
 function renderRaidCatalogAndHistory() {
   const catalogGrid = document.getElementById('raidCatalogGrid');
   const historyList = document.getElementById('recentRaidsList');
@@ -498,96 +809,125 @@ function renderRaidCatalogAndHistory() {
             <div class="raid-title">${info.icon} ${escapeHtml(info.name)}</div>
             <div class="raid-biome">${escapeHtml(info.biome)} • ${escapeHtml(info.severity)}</div>
           </div>
+          <button class="btn btn-xs btn-crimson" onclick="executeDeckCommand('randomevent ${escapeAttr(code)}')">
+            Summon
+          </button>
         </div>
-        <button class="btn btn-xs btn-amber" onclick="executeDeckCommand('randomevent ${escapeAttr(code)}')">
-          ⚔️ Trigger (${escapeHtml(code)})
-        </button>
+        <p class="cmd-card-desc"><em>"${escapeHtml(info.lore)}"</em></p>
       </div>
     `
     )
     .join('');
 
-  const raids = appState.raids || [];
   if (historyList) {
-    historyList.innerHTML = raids.length
-      ? raids
-          .slice(0, 6)
-          .map(
-            (r) => `
-          <div class="event-item evt-raid" style="margin-bottom:0.45rem">
-            <span class="event-icon">${r.icon || '⚔️'}</span>
+    const raids = appState.raids || [];
+    if (raids.length === 0) {
+      historyList.innerHTML = `<div class="viking-meta-line">No recent raids recorded on this server.</div>`;
+    } else {
+      historyList.innerHTML = raids
+        .slice(0, 8)
+        .map(
+          (r) => `
+          <div class="event-item evt-raid">
+            <span class="event-icon">⚔️</span>
             <div class="event-body">
-              <div class="event-title">${escapeHtml(r.name)}</div>
-              <div class="event-detail">Code: ${escapeHtml(r.code)} • Biome: ${escapeHtml(r.biome || 'Midgard')}</div>
+              <div class="event-title">${escapeHtml(r.name || 'Random Event')}</div>
+              <div class="event-detail">${r.biome ? escapeHtml(r.biome) : 'Midgard'} • Duration: ${r.durationSec || 120}s</div>
             </div>
             <span class="event-time">${formatRelativeTime(r.timestamp)}</span>
           </div>
         `
-          )
-          .join('')
-      : `<div class="viking-meta-line">No raids recorded yet.</div>`;
+        )
+        .join('');
+    }
   }
 }
 
+function updateActiveRaidAlarmBanner() {
+  const banner = document.getElementById('activeRaidAlarmBanner');
+  if (!banner || !appState) return;
+
+  const recentRaid = (appState.raids || [])[0];
+  const now = Date.now();
+  const isRecentRaid = recentRaid && (now - new Date(recentRaid.timestamp).getTime()) < 360000;
+
+  if (isRecentRaid) {
+    banner.classList.remove('hidden');
+    const titleEl = document.getElementById('activeRaidBannerTitle');
+    const detailEl = document.getElementById('activeRaidBannerDetail');
+    if (titleEl) titleEl.textContent = `"${recentRaid.name || 'Forsaken Assault'}"`;
+    if (detailEl) detailEl.textContent = recentRaid.biome ? `Raid active in ${recentRaid.biome}!` : 'Hostile forces have assaulted the settlement!';
+  } else {
+    banner.classList.add('hidden');
+  }
+}
+
+/* --------------------------------------------------------------------------
+   ACCESS CONTROL LISTS (ACL)
+   -------------------------------------------------------------------------- */
 function renderAclColumns() {
   if (!appState || !appState.accessLists) return;
-  const { admins, permitted, banned } = appState.accessLists;
+  const acl = appState.accessLists;
 
-  // Populate known players select dropdown
+  document.getElementById('aclAdminsCount').textContent = (acl.admins || []).length;
+  document.getElementById('aclPermittedCount').textContent = (acl.permitted || []).length;
+  document.getElementById('aclBannedCount').textContent = (acl.banned || []).length;
+
+  renderAclEntries('aclAdminsList', acl.admins, 'admins', '👑');
+  renderAclEntries('aclPermittedList', acl.permitted, 'permitted', '🛡️');
+  renderAclEntries('aclBannedList', acl.banned, 'banned', '🚫');
+
+  // Populate known player dropdown
   const select = document.getElementById('aclKnownPlayerSelect');
-  if (select) {
-    const currentVal = select.value;
+  if (select && appState.players) {
     select.innerHTML =
-      `<option value="">— Pick from Known Vikings or enter manually —</option>` +
-      (appState.players || [])
-        .map((p) => `<option value="${escapeAttr(p.steamId)}|${escapeAttr(p.name)}">${escapeHtml(p.name)} (${escapeHtml(p.steamId)})</option>`)
+      '<option value="">— Pick from Known Vikings or enter manually —</option>' +
+      appState.players
+        .map((p) => `<option value="${escapeAttr(p.steamId)}">${escapeHtml(p.name)} (${p.steamId})</option>`)
         .join('');
-    select.value = currentVal;
+  }
+}
+
+function renderAclEntries(containerId, entries, listType, icon) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  if (!entries || entries.length === 0) {
+    container.innerHTML = `<div class="viking-meta-line" style="padding:0.5rem 0">No entries in this list.</div>`;
+    return;
   }
 
-  const renderList = (items, listType, countId, listId) => {
-    document.getElementById(countId).textContent = items.length;
-    const container = document.getElementById(listId);
-    if (items.length === 0) {
-      container.innerHTML = `<div class="viking-meta-line">No entries in ${listType} list.</div>`;
-      return;
-    }
-    container.innerHTML = items
-      .map(
-        (item) => `
-        <div class="acl-entry">
-          <div>
-            <div class="viking-name-line">${escapeHtml(item.name || 'Viking')}</div>
-            <div class="viking-meta-line">${escapeHtml(item.steamId)}</div>
-          </div>
-          <button class="btn btn-xs btn-crimson" onclick="quickAclAction('${listType}', 'remove', '${escapeAttr(item.steamId)}', '${escapeAttr(item.name)}')">
-            Remove
-          </button>
+  container.innerHTML = entries
+    .map(
+      (e) => `
+      <div class="acl-entry">
+        <div>
+          <div class="viking-name-line">${icon} ${escapeHtml(e.name || 'Viking')}</div>
+          <div class="viking-meta-line">${escapeHtml(e.steamId)}</div>
         </div>
-      `
-      )
-      .join('');
-  };
-
-  renderList(admins || [], 'admins', 'aclAdminsCount', 'aclAdminsList');
-  renderList(permitted || [], 'permitted', 'aclPermittedCount', 'aclPermittedList');
-  renderList(banned || [], 'banned', 'aclBannedCount', 'aclBannedList');
+        <button class="btn btn-xs btn-crimson" onclick="quickAclAction('${listType}', 'remove', '${escapeAttr(e.steamId)}', '${escapeAttr(e.name || '')}')">
+          Remove
+        </button>
+      </div>
+    `
+    )
+    .join('');
 }
 
 function populateAclFromKnownPlayer(val) {
-  if (!val) return;
-  const [steamId, name] = val.split('|');
-  document.getElementById('aclSteamIdInput').value = steamId || '';
-  document.getElementById('aclNameInput').value = name || '';
+  if (!val || !appState) return;
+  const p = appState.players.find((x) => x.steamId === val);
+  if (p) {
+    document.getElementById('aclSteamIdInput').value = p.steamId;
+    document.getElementById('aclNameInput').value = p.name;
+  }
 }
 
 async function handleAclSubmit(e) {
   e.preventDefault();
+  const listType = document.getElementById('aclListTypeSelect').value;
   const steamId = document.getElementById('aclSteamIdInput').value.trim();
   const name = document.getElementById('aclNameInput').value.trim();
-  const listType = document.getElementById('aclListTypeSelect').value;
-  if (!steamId) return;
-
   await quickAclAction(listType, 'add', steamId, name);
   document.getElementById('aclSteamIdInput').value = '';
   document.getElementById('aclNameInput').value = '';
@@ -605,11 +945,15 @@ async function quickAclAction(listType, action, steamId, name) {
     appState = data.overview;
     renderAll();
     showToast(`📜 Updated ${listType}: ${action === 'add' ? 'Added' : 'Removed'} ${name || steamId}`);
+    playSfx('click');
   } catch (err) {
     showToast(`❌ ACL Error: ${err.message}`);
   }
 }
 
+/* --------------------------------------------------------------------------
+   BACKUPS & WORLDS VAULT
+   -------------------------------------------------------------------------- */
 function renderBackupsAndWorlds() {
   if (!appState) return;
   const { backups, worlds, container } = appState;
@@ -699,11 +1043,40 @@ async function deleteBackupFile(filename) {
   }
 }
 
+/* --------------------------------------------------------------------------
+   LIVE SERVER LOGS
+   -------------------------------------------------------------------------- */
 function setLogFilter(cat, btn) {
   activeLogFilter = cat;
+  playSfx('click');
   document.querySelectorAll('#logCategoryPills .pill').forEach((p) => p.classList.remove('active'));
   if (btn) btn.classList.add('active');
   renderLogStream();
+}
+
+function toggleLogAutoscroll() {
+  logAutoscroll = !logAutoscroll;
+  const btn = document.getElementById('btnToggleLogAutoscroll');
+  if (btn) btn.textContent = logAutoscroll ? '⬇ Autoscroll: ON' : '⏸ Autoscroll: OFF';
+  playSfx('click');
+}
+
+function downloadLogStream() {
+  if (!allLogs || allLogs.length === 0) {
+    showToast('⚠️ No log lines to export');
+    return;
+  }
+  const text = allLogs.map((l) => `[${l.timestamp}] [${l.category.toUpperCase()}] ${l.raw || l.message}`).join('\n');
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `valheim-server-logs-${new Date().toISOString().slice(0, 10)}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  showToast('📥 Downloaded server log stream');
+  playSfx('copy');
 }
 
 function renderLogStream() {
@@ -718,7 +1091,7 @@ function renderLogStream() {
   });
 
   viewer.innerHTML = filtered
-    .slice(-200)
+    .slice(-250)
     .map(
       (l) => `
       <div class="log-row">
@@ -730,12 +1103,18 @@ function renderLogStream() {
     )
     .join('');
 
-  viewer.scrollTop = viewer.scrollHeight;
+  if (logAutoscroll) {
+    viewer.scrollTop = viewer.scrollHeight;
+  }
 }
 
+/* --------------------------------------------------------------------------
+   SERVER ACTIONS & COMMAND EXECUTION
+   -------------------------------------------------------------------------- */
 async function triggerServerAction(action) {
   try {
     showToast(`⏳ Executing server action: ${action.toUpperCase()}...`);
+    playSfx('click');
     const res = await fetch('/api/server/action', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -746,6 +1125,7 @@ async function triggerServerAction(action) {
     appState = data.overview;
     renderAll();
     showToast(`✅ ${data.message}`);
+    playSfx('save');
   } catch (err) {
     showToast(`❌ Action failed: ${err.message}`);
   }
@@ -783,6 +1163,7 @@ async function runPresetCommand(command) {
     }
     appendTerminalLine(command, data.output, data.source);
     showToast(`⚡ Executed: ${command}`);
+    playSfx(command === 'save' ? 'save' : 'click');
   } catch (err) {
     showToast(`❌ Command error: ${err.message}`);
   }
@@ -793,6 +1174,10 @@ async function handleTerminalSubmit(e) {
   const input = document.getElementById('terminalCommandInput');
   const cmd = input.value.trim();
   if (!cmd) return;
+  if (!commandHistory.length || commandHistory[commandHistory.length - 1] !== cmd) {
+    commandHistory.push(cmd);
+  }
+  historyIndex = -1;
   input.value = '';
   await executeDeckCommand(cmd);
 }
@@ -810,6 +1195,7 @@ async function executeDeckCommand(command) {
     renderAll();
     appendTerminalLine(command, data.output, data.source);
     showToast(`⚡ ${command} — Done`);
+    playSfx(command.startsWith('randomevent') ? 'horn' : 'click');
   } catch (err) {
     appendTerminalLine(command, err.message, 'ERROR', true);
     showToast(`❌ ${err.message}`);
@@ -828,11 +1214,28 @@ function appendTerminalLine(cmd, output, source, isError = false) {
   term.scrollTop = term.scrollHeight;
 }
 
+function copyTerminalOutput() {
+  const term = document.getElementById('terminalHistory');
+  if (!term) return;
+  const text = term.innerText;
+  navigator.clipboard?.writeText(text);
+  showToast('📋 Copied terminal output to clipboard');
+  playSfx('copy');
+}
+
 function clearTerminalOutput() {
   const term = document.getElementById('terminalHistory');
   if (term) {
     term.innerHTML = `<div class="term-line term-sys">Terminal cleared. Ready for commands.</div>`;
+    playSfx('click');
   }
+}
+
+function toggleSimDrawer() {
+  const drawer = document.getElementById('simDrawerBody');
+  if (!drawer) return;
+  drawer.classList.toggle('hidden');
+  playSfx('click');
 }
 
 async function simulateLiveEvent(eventType) {
@@ -862,6 +1265,7 @@ async function simulateLiveEvent(eventType) {
       renderAll();
     }
     showToast(`🔥 Simulated live ${eventType.toUpperCase()} log event!`);
+    playSfx(eventType === 'raid' ? 'horn' : 'click');
   } catch (err) {
     showToast(`❌ ${err.message}`);
   }
@@ -886,15 +1290,11 @@ function renderActiveModsList() {
     settingsCountBadge.textContent = `${activeCount} / ${plugins.length} Active in BepInEx`;
   }
 
-  // 1. Overview Grid of Mod Cards
   if (container) {
     if (plugins.length === 0) {
       container.innerHTML = `
         <div style="grid-column: 1 / -1; padding: 1.5rem; text-align: center; color: var(--text-secondary); background: rgba(15,23,42,0.4); border-radius: 8px;">
           <p>No mods detected in <code>/config/bepinex/plugins/</code>.</p>
-          <button class="btn btn-sm btn-amber" onclick="triggerAutoConfigureServer()" style="margin-top:0.75rem">
-            ⚡ Install Performance Suite &amp; Telemetry
-          </button>
         </div>
       `;
     } else {
@@ -908,34 +1308,24 @@ function renderActiveModsList() {
 
           const isActive = p.status === 'active';
           const statusBadge = isActive
-            ? '<span class="mod-status-badge mod-status-active">Active in BepInEx</span>'
-            : '<span class="mod-status-badge mod-status-pending">Pending Sync</span>';
+            ? '<span class="role-badge role-permitted">Active in BepInEx</span>'
+            : '<span class="role-badge">Pending Sync</span>';
 
           const sizeStr = p.sizeBytes ? formatBytes(p.sizeBytes) : 'Bundled';
           const authorStr = p.author ? `by ${escapeHtml(p.author)}` : '';
 
           return `
-            <div class="mod-card">
-              <div class="mod-card-top">
-                <div class="mod-card-title-group">
-                  <div class="mod-card-title">
-                    <span>${icon}</span>
-                    <span>${escapeHtml(p.title || p.filename)}</span>
-                    <span class="mod-card-version">v${escapeHtml(p.version || '1.0')}</span>
-                  </div>
-                  <div class="mod-card-type">${escapeHtml(p.type || 'BepInEx Plugin')}</div>
+            <div class="cmd-card">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:0.5rem">
+                <div>
+                  <div class="cmd-card-title">${icon} ${escapeHtml(p.title || p.filename)}</div>
+                  <div class="cmd-card-desc">${escapeHtml(p.type || 'BepInEx Plugin')}</div>
                 </div>
                 ${statusBadge}
               </div>
-              <p class="mod-card-desc">${escapeHtml(p.description || '')}</p>
-              <div class="mod-card-footer">
-                <div class="mod-card-meta">
-                  <code>${escapeHtml(p.filename)}</code>
-                  <span>•</span>
-                  <span>${sizeStr}</span>
-                  ${authorStr ? `<span>•</span><span>${authorStr}</span>` : ''}
-                </div>
-                <span class="mod-pill-server">Zero Client Mod</span>
+              <p class="cmd-card-desc" style="margin-top:0.35rem">${escapeHtml(p.description || '')}</p>
+              <div class="viking-meta-line" style="margin-top:0.4rem">
+                <code>${escapeHtml(p.filename)}</code> • ${sizeStr} ${authorStr ? `• ${authorStr}` : ''}
               </div>
             </div>
           `;
@@ -943,69 +1333,11 @@ function renderActiveModsList() {
         .join('');
     }
   }
-
-  // 2. Settings Table
-  if (tableContainer) {
-    if (plugins.length === 0) {
-      tableContainer.innerHTML = `
-        <div style="padding: 1.25rem; text-align: center; color: var(--text-secondary);">
-          No BepInEx plugins configured yet.
-        </div>
-      `;
-    } else {
-      tableContainer.innerHTML = `
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Plugin / Mod</th>
-              <th>Category</th>
-              <th>Author</th>
-              <th>Filename</th>
-              <th>Size</th>
-              <th>Client Requirement</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${plugins
-              .map((p) => {
-                let icon = '🧩';
-                if (p.filename.includes('SpreadTheLoad')) icon = '👑';
-                else if (p.filename.includes('BetterNetworking')) icon = '⚡';
-                else if (p.filename.includes('ServerDevcommands')) icon = '🛠️';
-                else if (p.filename.includes('WatchtowerMapExporter')) icon = '🗺️';
-
-                const isActive = p.status === 'active';
-                const statusBadge = isActive
-                  ? '<span class="mod-status-badge mod-status-active">Active</span>'
-                  : '<span class="mod-status-badge mod-status-pending">Pending Sync</span>';
-
-                return `
-                  <tr>
-                    <td>
-                      <div style="display:flex;align-items:center;gap:0.45rem;font-weight:600">
-                        <span>${icon}</span>
-                        <span>${escapeHtml(p.title || p.filename)}</span>
-                        <span class="mod-card-version" style="font-size:0.68rem">v${escapeHtml(p.version || '1.0')}</span>
-                      </div>
-                    </td>
-                    <td style="color:#f59e0b;font-size:0.78rem;font-weight:600">${escapeHtml(p.type || 'BepInEx Plugin')}</td>
-                    <td style="color:#94a3b8;font-size:0.78rem">${escapeHtml(p.author || 'Custom')}</td>
-                    <td><code>${escapeHtml(p.filename)}</code></td>
-                    <td style="font-family:var(--font-mono);font-size:0.78rem">${p.sizeBytes ? formatBytes(p.sizeBytes) : '-'}</td>
-                    <td><span class="mod-pill-server">None (Server-Side)</span></td>
-                    <td>${statusBadge}</td>
-                  </tr>
-                `;
-              })
-              .join('')}
-          </tbody>
-        </table>
-      `;
-    }
-  }
 }
 
+/* --------------------------------------------------------------------------
+   SETTINGS & MODIFIERS & DISCORD EMBED SIMULATOR
+   -------------------------------------------------------------------------- */
 let modConfigsLoadedOnce = false;
 function populateSettingsAndModifiers() {
   if (!appState || !appState.settings) return;
@@ -1024,6 +1356,7 @@ function populateSettingsAndModifiers() {
   document.getElementById('settingRconPort').value = s.rconPort || 2458;
 
   updateServerArgsPreview();
+  updateDiscordEmbedPreview();
 
   const cfgSelect = document.getElementById('modConfigFileSelect');
   const files = appState.mods?.configFiles || [];
@@ -1056,12 +1389,35 @@ function updateServerArgsPreview() {
   if (codeEl) {
     codeEl.textContent = `SERVER_ARGS="${args.join(' ')}"`;
   }
+  updateDiscordEmbedPreview();
 }
 
 function copyGeneratedArgs() {
   const txt = document.getElementById('generatedServerArgsCode')?.textContent || '';
   navigator.clipboard?.writeText(txt);
+  playSfx('copy');
   showToast(`📋 Copied ${txt} to clipboard!`);
+}
+
+function updateDiscordEmbedPreview() {
+  const titleEl = document.getElementById('discordPreviewTitle');
+  const descEl = document.getElementById('discordPreviewDesc');
+  const vikingEl = document.getElementById('discordPreviewViking');
+  const biomeEl = document.getElementById('discordPreviewBiome');
+  if (!titleEl || !descEl) return;
+
+  const preset = document.getElementById('modPreset')?.value || 'Normal';
+  const worldName = appState?.serverMeta?.worldName || 'Midgard';
+
+  const onlineVikings = appState?.players?.filter((p) => p.online) || [];
+  const topViking = onlineVikings[0]?.name || 'Ragnar Lothbrok';
+  const topTelemetry = appState?.worldMap?.livePlayers?.[onlineVikings[0]?.steamId];
+  const biome = topTelemetry?.biome || 'Mountains';
+
+  titleEl.textContent = `⚔️ Raid Alert: You are being hunted in ${worldName}`;
+  descEl.textContent = `A pack of mountain wolves has ambushed the Vikings in ${worldName}! Combat modifier: ${preset}.`;
+  if (vikingEl) vikingEl.textContent = topViking;
+  if (biomeEl) biomeEl.textContent = biome;
 }
 
 async function saveIntegrationSettings(e) {
@@ -1085,6 +1441,7 @@ async function saveIntegrationSettings(e) {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error);
     showToast('💾 Saved Watchtower & Discord notification settings!');
+    playSfx('save');
   } catch (err) {
     showToast(`❌ ${err.message}`);
   }
@@ -1103,6 +1460,7 @@ async function testDiscordWebhook() {
   const data = await res.json();
   if (data.sent) {
     showToast('✅ Sent test Norse Embed to Discord!');
+    playSfx('horn');
   } else {
     showToast(`⚠️ Webhook test failed: ${data.reason || 'Check URL'}`);
   }
@@ -1115,6 +1473,8 @@ async function loadSelectedModConfig(filename) {
     const data = await res.json();
     if (data.ok) {
       document.getElementById('modConfigEditor').value = data.content;
+      const badge = document.getElementById('editorCurrentFileBadge');
+      if (badge) badge.textContent = filename;
     }
   } catch (_) {}
 }
@@ -1132,12 +1492,187 @@ async function saveCurrentModConfig() {
     const data = await res.json();
     if (!data.ok) throw new Error(data.error);
     showToast(`💾 Saved /config/bepinex/config/${filename}`);
+    playSfx('save');
   } catch (err) {
     showToast(`❌ ${err.message}`);
   }
 }
 
-/* Formatting Helpers */
+function handleEditorKeydown(e) {
+  if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+    e.preventDefault();
+    saveCurrentModConfig();
+  }
+}
+
+/* --------------------------------------------------------------------------
+   GLOBAL COMMAND PALETTE (OMNISearch)
+   -------------------------------------------------------------------------- */
+function openCommandPalette() {
+  const modal = document.getElementById('commandPaletteModal');
+  const input = document.getElementById('cmdPaletteInput');
+  if (!modal || !input) return;
+  modal.classList.remove('hidden');
+  input.value = '';
+  buildPaletteResults('');
+  input.focus();
+  playSfx('click');
+}
+
+function closeCommandPalette() {
+  const modal = document.getElementById('commandPaletteModal');
+  if (modal) modal.classList.add('hidden');
+}
+
+function handlePaletteBackdropClick(e) {
+  if (e.target.id === 'commandPaletteModal') {
+    closeCommandPalette();
+  }
+}
+
+function handlePaletteSearch(val) {
+  buildPaletteResults(val);
+}
+
+function handlePaletteKeydown(e) {
+  const items = document.querySelectorAll('.palette-item');
+  if (items.length === 0) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    paletteSelectedIndex = (paletteSelectedIndex + 1) % items.length;
+    updatePaletteSelection();
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    paletteSelectedIndex = (paletteSelectedIndex - 1 + items.length) % items.length;
+    updatePaletteSelection();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (items[paletteSelectedIndex]) {
+      items[paletteSelectedIndex].click();
+    }
+  } else if (e.key === 'Escape') {
+    closeCommandPalette();
+  }
+}
+
+function updatePaletteSelection() {
+  const items = document.querySelectorAll('.palette-item');
+  items.forEach((item, idx) => {
+    item.classList.toggle('selected', idx === paletteSelectedIndex);
+    if (idx === paletteSelectedIndex) {
+      item.scrollIntoView({ block: 'nearest' });
+    }
+  });
+}
+
+function buildPaletteResults(query) {
+  const container = document.getElementById('cmdPaletteResults');
+  if (!container) return;
+  const q = (query || '').toLowerCase().trim();
+
+  const candidates = [
+    // Tabs
+    { cat: 'Navigation', icon: '👁️', title: 'Watchtower Overview', desc: 'KPIs, live Vikings & server telemetry', action: () => switchTab('overview') },
+    { cat: 'Navigation', icon: '🗺️', title: 'Live World Map & Health', desc: 'Interactive Yggdrasil Cartography', action: () => switchTab('map') },
+    { cat: 'Navigation', icon: '⚔️', title: 'Hall of Vikings & Stats', desc: 'Player roster, sessions, deaths & roles', action: () => switchTab('players') },
+    { cat: 'Navigation', icon: '⚡', title: 'Command Deck & Raids', desc: 'RCON terminal, presets & raid launcher', action: () => switchTab('commands') },
+    { cat: 'Navigation', icon: '📜', title: 'Access Lists (ACL)', desc: 'Admins, Whitelist & Banned files', action: () => switchTab('acl') },
+    { cat: 'Navigation', icon: '🏛️', title: 'Backup Vault & Worlds', desc: 'Hot snapshots & world files', action: () => switchTab('backups') },
+    { cat: 'Navigation', icon: '📡', title: 'Live Server Logs', desc: 'Streaming stdout/stderr events', action: () => switchTab('logs') },
+    { cat: 'Navigation', icon: '⚙️', title: 'Modifiers & Discord Webhook', desc: 'SERVER_ARGS & alert embeds', action: () => switchTab('settings') },
+
+    // Server Operations
+    { cat: 'Server Ops', icon: '💾', title: 'Force World Save', desc: 'Flush active ZDOs to Midgard.db', action: () => triggerQuickSave() },
+    { cat: 'Server Ops', icon: '🛡️', title: 'Create Hot Backup Now', desc: 'Run valheim-backup archive', action: () => createNewBackup() },
+    { cat: 'Server Ops', icon: '🔄', title: 'Restart Valheim Server', desc: 'Gracefully save & supervisorctl restart', action: () => triggerServerAction('restart') },
+    { cat: 'Server Ops', icon: '⬇️', title: 'Check SteamCMD Update', desc: 'Run valheim-updater daemon', action: () => triggerServerAction('update') },
+    { cat: 'Server Ops', icon: '🛑', title: 'Stop Active Raid Event', desc: 'Execute stopevent command', action: () => executeDeckCommand('stopevent') },
+
+    // Commands & Presets
+    { cat: 'Commands', icon: '☀️', title: 'Clear Skies (env Clear)', desc: 'Dispel fog and rain across the world', action: () => executeDeckCommand('env Clear') },
+    { cat: 'Commands', icon: '⛈️', title: 'Thunderstorm (env ThunderStorm)', desc: 'Summon Thor\'s lightning storm', action: () => executeDeckCommand('env ThunderStorm') },
+    { cat: 'Commands', icon: '🕛', title: 'Lock High Noon (tod 0.5)', desc: 'Set time of day to midday', action: () => executeDeckCommand('tod 0.5') },
+    { cat: 'Commands', icon: '🌙', title: 'Restore Day/Night (tod -1)', desc: 'Unlock natural day cycle', action: () => executeDeckCommand('tod -1') },
+    { cat: 'Commands', icon: '🗝️', title: 'List Defeated Bosses (listkeys)', desc: 'View world progression keys', action: () => executeDeckCommand('listkeys') }
+  ];
+
+  // Add Known Vikings to candidates
+  if (appState && appState.players) {
+    appState.players.forEach((p) => {
+      candidates.push({
+        cat: 'Vikings',
+        icon: p.online ? '⛵' : '🛡️',
+        title: `${p.name} (${p.online ? 'Online' : 'Offline'})`,
+        desc: `SteamID: ${p.steamId} • Playtime: ${formatTotalPlaytime(p.totalPlaytimeSeconds || 0)}`,
+        action: () => {
+          if (p.online) jumpToVikingOnMap(p.steamId);
+          else {
+            switchTab('players');
+            const searchInput = document.getElementById('playerSearchInput');
+            if (searchInput) {
+              searchInput.value = p.name;
+              renderPlayersTable();
+            }
+          }
+        }
+      });
+    });
+  }
+
+  const filtered = q
+    ? candidates.filter((c) => c.title.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q) || c.cat.toLowerCase().includes(q))
+    : candidates;
+
+  paletteSelectedIndex = 0;
+
+  if (filtered.length === 0) {
+    container.innerHTML = `<div style="padding:1.5rem;text-align:center;color:var(--text-muted)">No matching actions or Vikings found for "${escapeHtml(q)}"</div>`;
+    return;
+  }
+
+  const groups = {};
+  filtered.forEach((item) => {
+    if (!groups[item.cat]) groups[item.cat] = [];
+    groups[item.cat].push(item);
+  });
+
+  let html = '';
+  let globalIndex = 0;
+  for (const [catName, catItems] of Object.entries(groups)) {
+    html += `<div class="palette-category">${escapeHtml(catName)}</div>`;
+    catItems.forEach((item) => {
+      const idx = globalIndex++;
+      html += `
+        <div class="palette-item ${idx === 0 ? 'selected' : ''}" data-idx="${idx}" onclick="executePaletteItem(${idx})">
+          <div class="palette-item-left">
+            <span class="palette-item-icon">${item.icon}</span>
+            <div>
+              <div class="palette-item-title">${escapeHtml(item.title)}</div>
+              <div class="palette-item-desc">${escapeHtml(item.desc)}</div>
+            </div>
+          </div>
+          <span class="palette-item-action">Jump →</span>
+        </div>
+      `;
+    });
+  }
+
+  container.innerHTML = html;
+  paletteItems = filtered;
+}
+
+function executePaletteItem(index) {
+  const item = paletteItems[index];
+  if (!item) return;
+  closeCommandPalette();
+  playSfx('click');
+  item.action();
+}
+
+/* --------------------------------------------------------------------------
+   FORMATTING HELPERS
+   -------------------------------------------------------------------------- */
 function formatRelativeTime(iso) {
   if (!iso) return 'Never';
   const t = new Date(iso).getTime();
@@ -1244,7 +1779,6 @@ function showToast(message) {
   }, 3800);
 }
 
-
 /* ==================== LIVE WORLD MAP & VIKING HEALTH ENGINE ==================== */
 let mapZoom = 1.0;
 let mapPanX = 0;
@@ -1264,6 +1798,49 @@ function requestMapRedraw() {
   });
 }
 
+function toggleMapFullscreen() {
+  const panel = document.getElementById('mapCanvasPanel');
+  if (!panel) return;
+  panel.classList.toggle('fullscreen-map');
+  const isFs = panel.classList.contains('fullscreen-map');
+  const btn = document.getElementById('btnMapFullscreen');
+  if (btn) btn.textContent = isFs ? '✕ Exit Fullscreen' : '⛶ Fullscreen';
+  setTimeout(() => {
+    const canvas = document.getElementById('valheimMapCanvas');
+    if (canvas) {
+      if (isFs) {
+        canvas.width = window.innerWidth - 60;
+        canvas.height = window.innerHeight - 140;
+      } else {
+        canvas.width = 860;
+        canvas.height = 680;
+      }
+    }
+    drawValheimMap();
+  }, 50);
+  playSfx('click');
+}
+
+function zoomMap(factor) {
+  mapZoom = Math.max(0.75, Math.min(8.0, mapZoom * factor));
+  requestMapRedraw();
+  playSfx('click');
+}
+
+function centerOnVikings() {
+  if (!appState || !appState.worldMap) return;
+  const livePlayers = appState.worldMap.livePlayersList || Object.values(appState.worldMap.livePlayers || {});
+  const activeWithGps = livePlayers.filter((p) => p.hasGps !== false);
+  if (activeWithGps.length === 0) {
+    resetMapView();
+    return;
+  }
+  const avgX = activeWithGps.reduce((s, p) => s + (p.x || 0), 0) / activeWithGps.length;
+  const avgZ = activeWithGps.reduce((s, p) => s + (p.z || 0), 0) / activeWithGps.length;
+  focusMapOnCoords(avgX, avgZ);
+  playSfx('click');
+}
+
 function initMapCanvasInteraction() {
   if (mapCanvasInitialized) return;
   const canvas = document.getElementById('valheimMapCanvas');
@@ -1278,6 +1855,11 @@ function initMapCanvasInteraction() {
 
   window.addEventListener('mouseup', () => {
     isDraggingMap = false;
+  });
+
+  canvas.addEventListener('mouseleave', () => {
+    const tooltip = document.getElementById('mapHoverTooltip');
+    if (tooltip) tooltip.classList.add('hidden');
   });
 
   canvas.addEventListener('mousemove', (e) => {
@@ -1297,7 +1879,7 @@ function initMapCanvasInteraction() {
 
     const readout = document.getElementById('mapCursorReadout');
     if (readout) {
-      readout.textContent = `X: ${wx}, Z: ${wz} • ${estimateClientBiome(wx, wz)}`;
+      readout.innerHTML = `<span class="coord-crosshair">⌖</span> X: ${wx}, Z: ${wz} • ${estimateClientBiome(wx, wz)}`;
     }
 
     if (isDraggingMap) {
@@ -1306,6 +1888,82 @@ function initMapCanvasInteraction() {
       dragStartX = e.clientX;
       dragStartY = e.clientY;
       requestMapRedraw();
+    }
+
+    // Marker Hit Testing for Hover Tooltip
+    const tooltip = document.getElementById('mapHoverTooltip');
+    if (tooltip && appState?.worldMap) {
+      let hoveredMarker = null;
+      const wm = appState.worldMap;
+      const livePlayers = wm.livePlayersList || Object.values(wm.livePlayers || {});
+      const toScreen = (x, z) => ({
+        x: cx + (x / worldRadius) * (baseRadiusPx * mapZoom),
+        y: cy - (z / worldRadius) * (baseRadiusPx * mapZoom)
+      });
+
+      for (const lp of livePlayers) {
+        if (lp.hasGps === false) continue;
+        const pt = toScreen(lp.x, lp.z);
+        if (Math.hypot(px - pt.x, py - pt.y) < 20) {
+          hoveredMarker = {
+            title: `⚔️ ${escapeHtml(lp.name)}`,
+            body: `<strong>Biome:</strong> ${escapeHtml(lp.biome)}<br>
+                   <strong>Health:</strong> ${lp.hp}/${lp.maxHp} HP<br>
+                   <strong>Stamina:</strong> ${lp.stamina}/${lp.maxStamina}<br>
+                   <strong>Activity:</strong> ${escapeHtml(lp.activity || 'Exploring')}`
+          };
+          break;
+        }
+      }
+
+      if (!hoveredMarker && wm.tombstones) {
+        for (const tomb of wm.tombstones) {
+          const pt = toScreen(tomb.x, tomb.z);
+          if (Math.hypot(px - pt.x, py - pt.y) < 18) {
+            hoveredMarker = {
+              title: `💀 Tombstone: ${escapeHtml(tomb.player)}`,
+              body: `Items dropped: ${tomb.itemsCount || 1}<br>Coordinates: (${tomb.x}, ${tomb.z})`
+            };
+            break;
+          }
+        }
+      }
+
+      if (!hoveredMarker && wm.portals) {
+        for (const p of wm.portals) {
+          const pt = toScreen(p.x, p.z);
+          if (Math.hypot(px - pt.x, py - pt.y) < 18) {
+            hoveredMarker = {
+              title: `🌀 Portal: ${escapeHtml(p.tag)}`,
+              body: `Biome: ${escapeHtml(p.biome)}<br>Coordinates: (${p.x}, ${p.z})`
+            };
+            break;
+          }
+        }
+      }
+
+      if (!hoveredMarker && wm.landmarks) {
+        for (const lm of wm.landmarks) {
+          const pt = toScreen(lm.x, lm.z);
+          if (Math.hypot(px - pt.x, py - pt.y) < 18) {
+            hoveredMarker = {
+              title: `${lm.icon || '📍'} ${escapeHtml(lm.name)}`,
+              body: `Status: ${escapeHtml(lm.status)}<br>Coordinates: (${lm.x}, ${lm.z})`
+            };
+            break;
+          }
+        }
+      }
+
+      if (hoveredMarker) {
+        tooltip.classList.remove('hidden');
+        tooltip.innerHTML = `<strong>${hoveredMarker.title}</strong><div style="font-size:0.73rem;color:var(--text-secondary);margin-top:0.2rem">${hoveredMarker.body}</div>`;
+        const wrapRect = canvas.parentElement.getBoundingClientRect();
+        tooltip.style.left = `${e.clientX - wrapRect.left}px`;
+        tooltip.style.top = `${e.clientY - wrapRect.top - 12}px`;
+      } else {
+        tooltip.classList.add('hidden');
+      }
     }
   });
 
@@ -1326,6 +1984,7 @@ function resetMapView() {
   mapPanX = 0;
   mapPanZ = 0;
   requestMapRedraw();
+  playSfx('click');
 }
 
 function focusMapOnCoords(x, z, label = '') {
@@ -1435,8 +2094,10 @@ function renderLiveMapAndVitals() {
             .map((f) => `<span class="food-chip">🍖 ${escapeHtml(f)}</span>`)
             .join('');
 
+          const isLowHp = hpPct < 25;
+
           return `
-            <div class="vital-card">
+            <div class="vital-card ${isLowHp ? 'low-hp' : ''}">
               <div class="vital-top-row">
                 <div>
                   <div class="viking-name-line">
@@ -1458,27 +2119,25 @@ function renderLiveMapAndVitals() {
                 <div class="vital-bar-wrap">
                   <div class="vital-bar-label">
                     <span class="text-crimson">❤️ Health</span>
-                    <strong>${lp.hp} / ${lp.maxHp} HP</strong>
+                    <span>${lp.hp || 100} / ${lp.maxHp || 100}</span>
                   </div>
                   <div class="vital-bar-track">
-                    <div class="vital-bar-fill-hp" style="width:${hpPct}%"></div>
+                    <div class="vital-bar-fill-hp" style="width: ${hpPct}%"></div>
                   </div>
                 </div>
 
                 <div class="vital-bar-wrap">
                   <div class="vital-bar-label">
                     <span class="text-amber">⚡ Stamina</span>
-                    <strong>${lp.stamina} / ${lp.maxStamina}</strong>
+                    <span>${lp.stamina || 100} / ${lp.maxStamina || 100}</span>
                   </div>
                   <div class="vital-bar-track">
-                    <div class="vital-bar-fill-stamina" style="width:${stamPct}%"></div>
+                    <div class="vital-bar-fill-stamina" style="width: ${stamPct}%"></div>
                   </div>
                 </div>
               </div>
 
-              <div class="food-chips-row">
-                ${foodsHtml}
-              </div>
+              ${foodsHtml ? `<div class="food-chips-row">${foodsHtml}</div>` : ''}
             </div>
           `;
         })
@@ -1486,50 +2145,159 @@ function renderLiveMapAndVitals() {
     }
   }
 
-  // Render Death Tombstones & Portals list
-  const poiContainer = document.getElementById('mapTombstonesAndPortals');
-  if (poiContainer) {
-    const tombs = (wm.tombstones || []).map(
-      (t) => `
-      <div class="acl-entry">
-        <div>
-          <div class="viking-name-line">💀 ${escapeHtml(t.player)}'s Tombstone</div>
-          <div class="viking-meta-line">${escapeHtml(t.biome)} (${t.x}, ${t.z}) • ${t.itemsCount || 20} items • ${formatRelativeTime(t.createdAt)}</div>
-        </div>
-        <button class="btn btn-xs btn-crimson" onclick="focusMapOnCoords(${t.x}, ${t.z}, '${escapeAttr(t.player)} Tombstone')">
-          Locate
-        </button>
-      </div>
-    `
-    );
+  // Render Tombstones & Portal Network List
+  const poiList = document.getElementById('mapTombstonesAndPortals');
+  if (poiList) {
+    const tombstones = wm.tombstones || [];
+    const portals = wm.portals || [];
+    const landmarks = wm.landmarks || [];
 
-    const portals = (wm.portals || []).map(
-      (p) => `
-      <div class="acl-entry">
-        <div>
-          <div class="viking-name-line">🌀 Portal: "${escapeHtml(p.tag)}"</div>
-          <div class="viking-meta-line">${escapeHtml(p.biome)} (${p.x}, ${p.z})</div>
-        </div>
-        <button class="btn btn-xs btn-frost" onclick="focusMapOnCoords(${p.x}, ${p.z}, 'Portal ${escapeAttr(p.tag)}')">
-          View
-        </button>
-      </div>
-    `
-    );
+    let poiHtml = '';
 
-    const combined = [...tombs, ...portals];
-    if (combined.length === 0) {
-      poiContainer.innerHTML = '<div class="viking-meta-line" style="padding:0.75rem">No active portals or death tombstones recorded.</div>';
-    } else {
-      poiContainer.innerHTML = combined.join('');
+    if (tombstones.length > 0) {
+      poiHtml += tombstones
+        .map(
+          (t) => `
+          <div class="event-item evt-death" style="cursor:pointer" onclick="focusMapOnCoords(${t.x}, ${t.z}, '${escapeAttr(t.player)} Tombstone')">
+            <span class="event-icon">💀</span>
+            <div class="event-body">
+              <div class="event-title">${escapeHtml(t.player)}'s Tombstone (${t.itemsCount || 1} items)</div>
+              <div class="event-detail">📍 X: ${t.x}, Z: ${t.z} • ${escapeHtml(t.biome || 'Wilderness')}</div>
+            </div>
+            <button class="btn btn-xs btn-crimson">Pan →</button>
+          </div>
+        `
+        )
+        .join('');
     }
+
+    if (portals.length > 0) {
+      poiHtml += portals
+        .map(
+          (p) => `
+          <div class="event-item" style="cursor:pointer" onclick="focusMapOnCoords(${p.x}, ${p.z}, '${escapeAttr(p.tag)} Portal')">
+            <span class="event-icon">🌀</span>
+            <div class="event-body">
+              <div class="event-title">Portal: ${escapeHtml(p.tag)}</div>
+              <div class="event-detail">📍 X: ${p.x}, Z: ${p.z} • ${escapeHtml(p.biome || 'Midgard')}</div>
+            </div>
+            <button class="btn btn-xs btn-frost">Pan →</button>
+          </div>
+        `
+        )
+        .join('');
+    }
+
+    if (landmarks.length > 0) {
+      poiHtml += landmarks
+        .slice(0, 4)
+        .map(
+          (lm) => `
+          <div class="event-item" style="cursor:pointer" onclick="focusMapOnCoords(${lm.x}, ${lm.z}, '${escapeAttr(lm.name)}')">
+            <span class="event-icon">${lm.icon || '🦌'}</span>
+            <div class="event-body">
+              <div class="event-title">${escapeHtml(lm.name)}</div>
+              <div class="event-detail">${escapeHtml(lm.status)} • (${lm.x}, ${lm.z})</div>
+            </div>
+            <button class="btn btn-xs btn-glass">Pan →</button>
+          </div>
+        `
+        )
+        .join('');
+    }
+
+    poiList.innerHTML = poiHtml || `<div class="viking-meta-line">No active death tombstones or portals recorded.</div>`;
   }
 
   drawValheimMap();
 }
 
+/* --------------------------------------------------------------------------
+   PROCEDURAL VALHEIM CARTOGRAPHY GENERATOR
+   -------------------------------------------------------------------------- */
+const TERRAIN_RES = 600;
+let cachedTerrainCanvas = null;
+let cachedTerrainSeed = null;
+let cachedBiomeLookup = null;
+let cachedBiomeLabels = [];
+
+function invalidateTerrainCacheAndDraw() {
+  cachedTerrainCanvas = null;
+  cachedTerrainSeed = null;
+  drawValheimMap();
+}
+
+function createSeededNoise2D(seedInput) {
+  let s = typeof seedInput === 'number' ? seedInput : 84920177;
+  const nextRandom = () => {
+    s = (s * 1664525 + 1013904223) % 4294967296;
+    return s / 4294967296;
+  };
+
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) p[i] = i;
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(nextRandom() * (i + 1));
+    const tmp = p[i];
+    p[i] = p[j];
+    p[j] = tmp;
+  }
+  const perm = new Uint8Array(512);
+  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
+
+  const fade = (t) => t * t * t * (t * (t * 6 - 15) + 10);
+  const lerp = (t, a, b) => a + t * (b - a);
+  const grad = (hash, x, y) => {
+    const h = hash & 7;
+    const u = h < 4 ? x : y;
+    const v = h < 4 ? y : x;
+    return ((h & 1) === 0 ? u : -u) + ((h & 2) === 0 ? v : -v);
+  };
+
+  return function noise2D(x, y) {
+    const X = Math.floor(x) & 255;
+    const Y = Math.floor(y) & 255;
+    const xf = x - Math.floor(x);
+    const yf = y - Math.floor(y);
+    const u = fade(xf);
+    const v = fade(yf);
+    const aa = perm[perm[X] + Y];
+    const ab = perm[perm[X] + Y + 1];
+    const ba = perm[perm[X + 1] + Y];
+    const bb = perm[perm[X + 1] + Y + 1];
+    return lerp(v, lerp(u, grad(aa, xf, yf), grad(ba, xf - 1, yf)), lerp(u, grad(ab, xf, yf - 1), grad(bb, xf - 1, yf - 1)));
+  };
+}
+
+let cachedParchmentCanvas = null;
+function getParchmentCanvas() {
+  if (cachedParchmentCanvas) return cachedParchmentCanvas;
+  const pcan = document.createElement('canvas');
+  pcan.width = 256;
+  pcan.height = 256;
+  const pctx = pcan.getContext('2d');
+  const imgData = pctx.createImageData(256, 256);
+  const pix = imgData.data;
+  const pNoise = createSeededNoise2D(1234567);
+
+  for (let y = 0; y < 256; y++) {
+    for (let x = 0; x < 256; x++) {
+      const idx = (y * 256 + x) * 4;
+      const n1 = pNoise(x * 0.04, y * 0.04);
+      const n2 = pNoise(x * 0.12 + 10, y * 0.12 + 10);
+      const val = 186 + n1 * 18 + n2 * 10;
+      pix[idx] = Math.max(140, Math.min(220, val * 0.98));
+      pix[idx + 1] = Math.max(120, Math.min(200, val * 0.86));
+      pix[idx + 2] = Math.max(90, Math.min(170, val * 0.62));
+      pix[idx + 3] = 255;
+    }
+  }
+  pctx.putImageData(imgData, 0, 0);
+  cachedParchmentCanvas = pcan;
+  return pcan;
+}
+
 const BIOME_NAMES_BY_CODE = {
-  0: 'Ocean',
   1: 'Meadows',
   2: 'Black Forest',
   3: 'Swamp',
@@ -1540,166 +2308,65 @@ const BIOME_NAMES_BY_CODE = {
   8: 'Deep North'
 };
 
-let cachedTerrainCanvas = null;
-let cachedTerrainKey = '';
-let cachedBiomeLookup = null;
-let cachedBiomeLabels = [];
-let cachedParchmentCanvas = null;
-const TERRAIN_RES = 600;
-
-function invalidateTerrainCacheAndDraw() {
-  cachedTerrainKey = '';
-  drawValheimMap();
-}
-
-function createSeededNoise2D(seedInput) {
-  let s = (Number(seedInput) || 84920177) >>> 0;
-  if (s === 0) s = 84920177;
-  const rand = () => {
-    s = (s + 0x6d2b79f5) | 0;
-    let t = Math.imul(s ^ (s >>> 15), 1 | s);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-
-  const perm = new Uint8Array(512);
-  const gradX = new Float32Array(256);
-  const gradY = new Float32Array(256);
-  const p = new Uint8Array(256);
-  for (let i = 0; i < 256; i++) {
-    p[i] = i;
-    const ang = rand() * Math.PI * 2;
-    gradX[i] = Math.cos(ang);
-    gradY[i] = Math.sin(ang);
-  }
-  for (let i = 255; i > 0; i--) {
-    const j = Math.floor(rand() * (i + 1));
-    const tmp = p[i];
-    p[i] = p[j];
-    p[j] = tmp;
-  }
-  for (let i = 0; i < 512; i++) perm[i] = p[i & 255];
-
-  const noise2D = (x, y) => {
-    const X = Math.floor(x) & 255;
-    const Y = Math.floor(y) & 255;
-    const xf = x - Math.floor(x);
-    const yf = y - Math.floor(y);
-    const u = xf * xf * xf * (xf * (xf * 6 - 15) + 10);
-    const v = yf * yf * yf * (yf * (yf * 6 - 15) + 10);
-
-    const aa = perm[perm[X] + Y];
-    const ab = perm[perm[X] + Y + 1];
-    const ba = perm[perm[X + 1] + Y];
-    const bb = perm[perm[X + 1] + Y + 1];
-
-    const dotAA = gradX[aa] * xf + gradY[aa] * yf;
-    const dotBA = gradX[ba] * (xf - 1) + gradY[ba] * yf;
-    const dotAB = gradX[ab] * xf + gradY[ab] * (yf - 1);
-    const dotBB = gradX[bb] * (xf - 1) + gradY[bb] * (yf - 1);
-
-    const x1 = dotAA + u * (dotBA - dotAA);
-    const x2 = dotAB + u * (dotBB - dotAB);
-    return x1 + v * (x2 - x1);
-  };
-
-  const fbm = (x, y, octaves = 5, lacunarity = 2.05, gain = 0.5) => {
-    let total = 0;
-    let amp = 0.5;
-    let freq = 1.0;
-    let norm = 0;
-    for (let i = 0; i < octaves; i++) {
-      total += noise2D(x * freq + i * 17.3, y * freq + i * 31.7) * amp;
-      norm += amp;
-      amp *= gain;
-      freq *= lacunarity;
-    }
-    return total / norm; // roughly [-0.7, 0.7]
-  };
-
-  return { noise2D, fbm };
-}
-
-function getParchmentCanvas() {
-  if (cachedParchmentCanvas) return cachedParchmentCanvas;
-  const pc = document.createElement('canvas');
-  pc.width = 512;
-  pc.height = 512;
-  const pctx = pc.getContext('2d');
-  const img = pctx.createImageData(512, 512);
-  const data = img.data;
-  const { fbm } = createSeededNoise2D(133742);
-
-  for (let y = 0; y < 512; y++) {
-    for (let x = 0; x < 512; x++) {
-      const n1 = fbm(x * 0.012, y * 0.012, 4);
-      const n2 = fbm(x * 0.045, y * 0.045, 3);
-      const v = n1 * 28 + n2 * 10;
-      const idx = (y * 512 + x) * 4;
-      data[idx] = Math.max(135, Math.min(215, Math.round(184 + v)));
-      data[idx + 1] = Math.max(115, Math.min(190, Math.round(160 + v * 0.88)));
-      data[idx + 2] = Math.max(80, Math.min(150, Math.round(116 + v * 0.68)));
-      data[idx + 3] = 255;
-    }
-  }
-  pctx.putImageData(img, 0, 0);
-  cachedParchmentCanvas = pc;
-  return pc;
-}
-
 function decodeBase64ToUint8(b64) {
-  try {
-    const bin = atob(b64);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  } catch (_) {
-    return null;
+  const binary = atob(b64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
   }
+  return bytes;
 }
 
 function ensureValheimTerrainCache(wm) {
-  const showBorders = document.getElementById('toggleBiomeBorders')?.checked !== false;
-  const seedNum = Number(wm.seedNumeric) || 84920177;
-  const hasServerGrid = Boolean(wm.terrainGrid && wm.terrainGrid.biomesBase64 && wm.terrainGrid.heightsBase64);
-  const key = `${seedNum}_${showBorders ? 1 : 0}_${hasServerGrid ? wm.terrainGrid.biomesBase64.length : 0}`;
-
-  if (cachedTerrainCanvas && cachedTerrainKey === key) {
+  const seedKey = `${wm.seedNumeric || wm.seedName || 'default'}-${TERRAIN_RES}`;
+  if (cachedTerrainCanvas && cachedTerrainSeed === seedKey) {
     return cachedTerrainCanvas;
   }
-  cachedTerrainKey = key;
 
-  const off = document.createElement('canvas');
-  off.width = TERRAIN_RES;
-  off.height = TERRAIN_RES;
-  const octx = off.getContext('2d');
-  const imgData = octx.createImageData(TERRAIN_RES, TERRAIN_RES);
+  const canvas = document.createElement('canvas');
+  canvas.width = TERRAIN_RES;
+  canvas.height = TERRAIN_RES;
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.createImageData(TERRAIN_RES, TERRAIN_RES);
   const pixels = imgData.data;
 
-  const { noise2D, fbm } = createSeededNoise2D(seedNum);
+  const noise2D = createSeededNoise2D(wm.seedNumeric || 84920177);
+  const fbm = (x, y, octaves = 5, lacunarity = 2.0, gain = 0.5) => {
+    let sum = 0;
+    let amp = 0.5;
+    let freq = 1.0;
+    let max = 0;
+    for (let i = 0; i < octaves; i++) {
+      sum += noise2D(x * freq, y * freq) * amp;
+      max += amp;
+      freq *= lacunarity;
+      amp *= gain;
+    }
+    return sum / max;
+  };
+
   const heights = new Float32Array(TERRAIN_RES * TERRAIN_RES);
   const biomes = new Uint8Array(TERRAIN_RES * TERRAIN_RES);
   const seaLevel = 0.38;
 
-  let srvBiomes = null;
-  let srvHeights = null;
-  let srvSize = 200;
-  let srvSeaByte = 40;
-  if (hasServerGrid) {
-    srvBiomes = decodeBase64ToUint8(wm.terrainGrid.biomesBase64);
-    srvHeights = decodeBase64ToUint8(wm.terrainGrid.heightsBase64);
-    srvSize = wm.terrainGrid.gridSize || 200;
-    srvSeaByte = wm.terrainGrid.seaLevelByte || 40;
+  let serverHeights = null;
+  let serverBiomes = null;
+  let serverGridRes = 0;
+
+  if (wm.terrainGrid && wm.terrainGrid.resolution && wm.terrainGrid.heightsB64 && wm.terrainGrid.biomesB64) {
+    try {
+      serverGridRes = wm.terrainGrid.resolution;
+      serverHeights = decodeBase64ToUint8(wm.terrainGrid.heightsB64);
+      serverBiomes = decodeBase64ToUint8(wm.terrainGrid.biomesB64);
+    } catch (_) {}
   }
 
-  // Pass 1: Compute exact Height & Biome for every pixel in the 600x600 world disc
   for (let py = 0; py < TERRAIN_RES; py++) {
-    const nz = 1.0 - (py / (TERRAIN_RES - 1)) * 2.0; // [+1 north .. -1 south]
-    const wz = nz * 10500;
     for (let px = 0; px < TERRAIN_RES; px++) {
-      const nx = (px / (TERRAIN_RES - 1)) * 2.0 - 1.0; // [-1 west .. +1 east]
-      const wx = nx * 10500;
       const idx = py * TERRAIN_RES + px;
+      const nx = (px / (TERRAIN_RES - 1)) * 2.0 - 1.0;
+      const nz = 1.0 - (py / (TERRAIN_RES - 1)) * 2.0;
       const distNorm = Math.hypot(nx, nz);
 
       if (distNorm > 1.0) {
@@ -1708,35 +2375,19 @@ function ensureValheimTerrainCache(wm) {
         continue;
       }
 
-      const worldDist = distNorm * 10500;
+      const worldRadius = wm.worldRadius || 10500;
+      const wx = nx * worldRadius;
+      const wz = nz * worldRadius;
+      const worldDist = Math.hypot(wx, wz);
 
-      if (srvBiomes && srvHeights && srvBiomes.length === srvSize * srvSize) {
-        // Bilinearly sample real WorldGenerator height + biome grid exported from Valheim server
-        const gx = ((px + 0.5) / TERRAIN_RES) * (srvSize - 1);
-        const gy = ((py + 0.5) / TERRAIN_RES) * (srvSize - 1);
-        const x0 = Math.floor(gx);
-        const y0 = Math.floor(gy);
-        const x1 = Math.min(srvSize - 1, x0 + 1);
-        const y1 = Math.min(srvSize - 1, y0 + 1);
-        const tx = gx - x0;
-        const ty = gy - y0;
+      if (serverHeights && serverBiomes && serverGridRes > 0) {
+        const sx = Math.max(0, Math.min(serverGridRes - 1, Math.round((px / (TERRAIN_RES - 1)) * (serverGridRes - 1))));
+        const sy = Math.max(0, Math.min(serverGridRes - 1, Math.round((py / (TERRAIN_RES - 1)) * (serverGridRes - 1))));
+        const sIdx = sy * serverGridRes + sx;
 
-        const h00 = srvHeights[y0 * srvSize + x0];
-        const h10 = srvHeights[y0 * srvSize + x1];
-        const h01 = srvHeights[y1 * srvSize + x0];
-        const h11 = srvHeights[y1 * srvSize + x1];
-        const hInterp = h00 * (1 - tx) * (1 - ty) + h10 * tx * (1 - ty) + h01 * (1 - tx) * ty + h11 * tx * ty;
-
-        // Add subtle high-frequency shoreline fractal detail so coastlines are crisp at 600x600
-        const micro = fbm(nx * 22, nz * 22, 3) * 3.2;
-        const hNorm = seaLevel + ((hInterp + micro - srvSeaByte) / 110.0) * 0.55;
-        heights[idx] = Math.max(0.02, Math.min(0.99, hNorm));
-
-        const nearX = Math.round(gx);
-        const nearY = Math.round(gy);
-        let bCode = srvBiomes[nearY * srvSize + nearX] || 1;
-        // Enforce Valheim spawn biome override: within 550m of (0,0) on land is always Meadows (1), and no Mountains (4) inside 1000m
-        if (heights[idx] >= seaLevel) {
+        heights[idx] = serverHeights[sIdx] / 255.0;
+        let bCode = serverBiomes[sIdx];
+        if (worldDist < 1000) {
           if (worldDist < 550) bCode = 1;
           else if (worldDist < 1000 && bCode === 4) bCode = 2;
         }
@@ -1744,7 +2395,6 @@ function ensureValheimTerrainCache(wm) {
         continue;
       }
 
-      // High-detail multi-octave Valheim procedural terrain & biome generator (seeded from .fwl seedNumeric)
       const warpX = nx + fbm(nx * 3.2 + 5.1, nz * 3.2 + 1.7, 3) * 0.14;
       const warpZ = nz + fbm(nx * 3.2 + 9.4, nz * 3.2 + 4.8, 3) * 0.14;
 
@@ -1752,28 +2402,22 @@ function ensureValheimTerrainCache(wm) {
       const ridgeNoise = 1.0 - Math.abs(noise2D(warpX * 4.5 + 11.2, warpZ * 4.5 - 7.4));
       const detailNoise = fbm(nx * 14.0, nz * 14.0, 3) * 0.08;
 
-      // Carve winding river/fjord channels between continents
       const startDist = Math.hypot(nx * 1.15, nz * 0.92);
       const riverVal = Math.abs(fbm(warpX * 4.2 + 30.0, warpZ * 4.2 - 18.0, 2));
       const riverCarve = riverVal < 0.028 && startDist > 0.06 ? (0.028 - riverVal) * 4.2 : 0;
-
-      // Rim drop-off near World Edge
       const rimDrop = distNorm > 0.88 ? (distNorm - 0.88) * 2.2 : 0;
 
       let h = 0.41 + continentNoise * 0.58 + detailNoise - riverCarve - rimDrop;
-      // Only add steep alpine mountain ridges outside the 1000m starting sanctuary
       if (h > seaLevel + 0.13 && worldDist > 1000) {
         const ridgeScale = Math.min(1.0, (worldDist - 1000) / 600);
         h += Math.pow(ridgeNoise, 2.2) * 0.22 * ridgeScale;
       }
 
-      // Central starting island override: ensure gentle rolling Meadows around (0,0) (never submerged & never mountain-peak height)
       if (startDist < 0.22) {
         const spawnWeight = Math.min(1.0, (0.22 - startDist) / 0.14);
         const gentleMeadowHeight = 0.47 + continentNoise * 0.12 + detailNoise * 0.6;
         h = h * (1.0 - spawnWeight) + gentleMeadowHeight * spawnWeight;
 
-        // Carve an organic inner lagoon/bay slightly east of spawn (0,0) while keeping (0,0) dry Meadows
         const lakeDist = Math.hypot(nx - 0.042, nz + 0.012);
         if (lakeDist < 0.048 && Math.hypot(nx, nz) > 0.028) {
           h -= (0.048 - lakeDist) * 2.8;
@@ -1784,45 +2428,40 @@ function ensureValheimTerrainCache(wm) {
       heights[idx] = h;
 
       if (h < seaLevel) {
-        biomes[idx] = 0; // Ocean
+        biomes[idx] = 0;
         continue;
       }
 
-      // Valheim Biome Assignment Rules (matching WorldGenerator.GetBiome distance & altitude constraints)
-      // - Within 600m of (0,0): strictly Meadows (with Black Forest edges only starting > 520m)
-      // - Within 1000m of (0,0): Mountains (biome 4) are forbidden (m_minMountainDistance = 1000m); high terrain stays Meadows/Black Forest
       const bNoise1 = fbm(warpX * 2.4 + 41.0, warpZ * 2.4 - 19.0, 4);
       const bNoise2 = fbm(warpX * 3.1 - 23.0, warpZ * 3.1 + 67.0, 4);
 
-      let biome = 1; // Default Meadows
+      let biome = 1;
       if (worldDist < 600) {
-        // Strict spawn sanctuary override: always Meadows near (0,0), with occasional Black Forest pockets only near the outer 520-600m edge
         biome = worldDist > 520 && bNoise1 > 0.18 ? 2 : 1;
       } else if (wz < -7300 + bNoise1 * 650) {
-        biome = 7; // Ashlands
+        biome = 7;
       } else if (wz > 7300 + bNoise1 * 650) {
-        biome = 8; // Deep North
+        biome = 8;
       } else if (worldDist >= 1000 && (h > 0.66 || (worldDist > 1400 && h > 0.61))) {
-        biome = 4; // Mountains (only allowed >= 1000m from spawn)
+        biome = 4;
       } else if (worldDist < 1000) {
-        // 600m - 1000m ring: only Meadows and Black Forest allowed (no Mountains or Swamps)
         biome = bNoise1 > -0.02 || h > 0.56 ? 2 : 1;
       } else if (worldDist < 2100) {
-        if (bNoise1 < -0.14 && h < 0.49 && worldDist > 1250) biome = 3; // Swamp
-        else if (bNoise1 > -0.02) biome = 2; // Black Forest
-        else biome = 1; // Meadows
+        if (bNoise1 < -0.14 && h < 0.49 && worldDist > 1250) biome = 3;
+        else if (bNoise1 > -0.02) biome = 2;
+        else biome = 1;
       } else if (worldDist < 4800) {
-        if (bNoise2 > 0.14 && worldDist > 2600) biome = 5; // Plains
-        else if (bNoise1 < -0.06 && h < 0.52) biome = 3; // Swamp
-        else if (bNoise1 > 0.04) biome = 2; // Black Forest
-        else biome = 1; // Meadows
+        if (bNoise2 > 0.14 && worldDist > 2600) biome = 5;
+        else if (bNoise1 < -0.06 && h < 0.52) biome = 3;
+        else if (bNoise1 > 0.04) biome = 2;
+        else biome = 1;
       } else if (worldDist < 8200) {
-        if (bNoise2 > 0.06 && worldDist > 5600) biome = 6; // Mistlands
-        else if (bNoise1 > -0.08) biome = 5; // Plains
-        else if (h < 0.50) biome = 3; // Swamp
-        else biome = 2; // Black Forest
+        if (bNoise2 > 0.06 && worldDist > 5600) biome = 6;
+        else if (bNoise1 > -0.08) biome = 5;
+        else if (h < 0.50) biome = 3;
+        else biome = 2;
       } else {
-        biome = bNoise2 > -0.05 ? 6 : 5; // Outer Mistlands & Plains
+        biome = bNoise2 > -0.05 ? 6 : 5;
       }
 
       biomes[idx] = biome;
@@ -1831,34 +2470,30 @@ function ensureValheimTerrainCache(wm) {
 
   cachedBiomeLookup = biomes;
 
-  // Biome base RGB palettes (matching Valheim's in-game minimap textures)
   const BIOME_PALETTE = {
-    1: [118, 158, 74],  // Meadows: warm mossy olive-green
-    2: [49, 92, 58],    // Black Forest: deep Nordic pine green
-    3: [84, 66, 48],    // Swamp: murky bog umber-brown
-    4: [158, 168, 180], // Mountains: rocky alpine slate -> snow
-    5: [198, 156, 62],  // Plains: golden-ochre savannah
-    6: [106, 70, 142],  // Mistlands: royal violet-slate crags
-    7: [168, 48, 42],   // Ashlands: charred volcanic crimson
-    8: [216, 228, 240]  // Deep North: glacial snow-blue
+    1: [118, 158, 74],
+    2: [49, 92, 58],
+    3: [84, 66, 48],
+    4: [158, 168, 180],
+    5: [198, 156, 62],
+    6: [106, 70, 142],
+    7: [168, 48, 42],
+    8: [216, 228, 240]
   };
 
-  // Distinct high-contrast border colors for each biome when Biome Borders are enabled
   const BIOME_BORDER_RGB = {
-    1: [163, 230, 53],  // Meadows border
-    2: [52, 211, 153],  // Black Forest border
-    3: [217, 119, 6],   // Swamp border
-    4: [255, 255, 255], // Mountains border
-    5: [250, 204, 21],  // Plains border
-    6: [216, 180, 254], // Mistlands border
-    7: [248, 113, 113], // Ashlands border
-    8: [186, 230, 253]  // Deep North border
+    1: [163, 230, 53],
+    2: [52, 211, 153],
+    3: [217, 119, 6],
+    4: [255, 255, 255],
+    5: [250, 204, 21],
+    6: [216, 180, 254],
+    7: [248, 113, 113],
+    8: [186, 230, 253]
   };
 
-  // Track biome region centroids for clean cartographic region labels
   const regionAccum = {};
 
-  // Pass 2: Shade every pixel (ocean depth, beaches, hillshading, tree canopy stippling, and crisp biome boundaries)
   for (let py = 0; py < TERRAIN_RES; py++) {
     for (let px = 0; px < TERRAIN_RES; px++) {
       const idx = py * TERRAIN_RES + px;
@@ -1875,19 +2510,16 @@ function ensureValheimTerrainCache(wm) {
       const h = heights[idx];
       const b = biomes[idx];
 
-      // Ocean / Water Shading
       if (b === 0 || h < seaLevel) {
         const depth = Math.max(0, Math.min(1, (seaLevel - h) / seaLevel));
         const wave = noise2D(px * 0.18, py * 0.18) * 6;
         let r, g, bl;
         if (depth < 0.08) {
-          // Shallow coastal water shelf
           const t = depth / 0.08;
           r = 58 * (1 - t) + 32 * t + wave;
           g = 122 * (1 - t) + 84 * t + wave;
           bl = 146 * (1 - t) + 118 * t + wave;
         } else {
-          // Deep Nordic Sea
           const t = Math.min(1, (depth - 0.08) / 0.75);
           r = 32 * (1 - t) + 14 * t + wave * 0.5;
           g = 84 * (1 - t) + 38 * t + wave * 0.5;
@@ -1900,14 +2532,12 @@ function ensureValheimTerrainCache(wm) {
         continue;
       }
 
-      // Compute 3D topographic hillshade from neighboring pixel heights (NW directional sunlight)
       const hL = px > 0 ? heights[idx - 1] : h;
       const hR = px < TERRAIN_RES - 1 ? heights[idx + 1] : h;
       const hU = py > 0 ? heights[idx - TERRAIN_RES] : h;
       const hD = py < TERRAIN_RES - 1 ? heights[idx + TERRAIN_RES] : h;
       const dx = (hR - hL) * 18.0;
       const dy = (hD - hU) * 18.0;
-      const slope = Math.hypot(dx, dy);
       const hillshade = Math.max(0.58, Math.min(1.36, 1.02 - dx * 0.65 - dy * 0.65));
 
       const base = BIOME_PALETTE[b] || BIOME_PALETTE[1];
@@ -1915,17 +2545,14 @@ function ensureValheimTerrainCache(wm) {
       let g = base[1];
       let bl = base[2];
 
-      // Fine organic texture & tree canopy stippling (matching Screenshot 1's forested islands)
       const canopy = noise2D(px * 0.38, py * 0.38);
       const microPatch = noise2D(px * 0.09 + 19.3, py * 0.09 - 11.7);
 
       if (h < seaLevel + 0.015) {
-        // Sandy / rocky coastal shoreline beach
         r = 198;
         g = 178;
         bl = 136;
       } else if (b === 1) {
-        // Meadows: grassy clearings + dark olive tree clusters
         r += microPatch * 18;
         g += microPatch * 22;
         bl += microPatch * 10;
@@ -1935,116 +2562,85 @@ function ensureValheimTerrainCache(wm) {
           bl *= 0.62;
         }
       } else if (b === 2) {
-        // Black Forest: dense dark conifer canopy dots
         r += microPatch * 12;
         g += microPatch * 16;
-        bl += microPatch * 10;
-        if (canopy > 0.08) {
-          r *= 0.64;
-          g *= 0.70;
-          bl *= 0.64;
+        bl += microPatch * 12;
+        if (canopy > 0.16) {
+          r *= 0.58;
+          g *= 0.64;
+          bl *= 0.54;
         }
       } else if (b === 3) {
-        // Swamp: waterlogged bog pools & dead trees
-        if (microPatch < -0.15) {
-          r = 46;
-          g = 64;
-          bl = 58;
-        } else if (canopy > 0.22) {
+        r += microPatch * 14;
+        g += microPatch * 10;
+        bl += microPatch * 8;
+        if (canopy > 0.28) {
           r *= 0.72;
-          g *= 0.72;
+          g *= 0.75;
           bl *= 0.68;
         }
       } else if (b === 4) {
-        // Mountains: steep dark slate cliff walls + bright snow-capped peaks
-        if (slope > 0.26 || h < 0.66) {
-          r = 112 + microPatch * 16;
-          g = 118 + microPatch * 16;
-          bl = 128 + microPatch * 18;
+        if (h > 0.68) {
+          r = 236 + microPatch * 12;
+          g = 242 + microPatch * 10;
+          bl = 248 + microPatch * 6;
         } else {
-          r = 232 + microPatch * 12;
-          g = 238 + microPatch * 12;
-          bl = 246 + microPatch * 10;
+          r = 142 + microPatch * 16;
+          g = 148 + microPatch * 16;
+          bl = 158 + microPatch * 18;
         }
       } else if (b === 5) {
-        // Plains: golden heath + birch tree clusters
         r += microPatch * 20;
         g += microPatch * 16;
-        bl += microPatch * 8;
-        if (canopy > 0.30) {
-          r *= 0.78;
-          g *= 0.76;
-          bl *= 0.65;
-        }
+        bl += microPatch * 10;
       } else if (b === 6) {
-        // Mistlands: jagged dark crags & violet mist valleys
-        r += microPatch * 22;
+        r += microPatch * 16;
         g += microPatch * 14;
-        bl += microPatch * 26;
-        if (canopy > 0.20) {
-          r *= 0.68;
-          g *= 0.65;
-          bl *= 0.74;
-        }
+        bl += microPatch * 22;
+      } else if (b === 7) {
+        r += microPatch * 24;
+        g += microPatch * 8;
+        bl += microPatch * 6;
+      } else if (b === 8) {
+        r = 228 + microPatch * 12;
+        g = 238 + microPatch * 12;
+        bl = 246 + microPatch * 8;
       }
 
-      // Apply 3D topographic hillshading
       r *= hillshade;
       g *= hillshade;
       bl *= hillshade;
 
-      // Check neighbors for Coastline OR Biome Boundary
-      const bL = px > 0 ? biomes[idx - 1] : b;
-      const bR = px < TERRAIN_RES - 1 ? biomes[idx + 1] : b;
-      const bU = py > 0 ? biomes[idx - TERRAIN_RES] : b;
-      const bD = py < TERRAIN_RES - 1 ? biomes[idx + TERRAIN_RES] : b;
+      const showBorders = document.getElementById('toggleBiomeBorders')?.checked !== false;
+      if (showBorders) {
+        const bL = px > 0 ? biomes[idx - 1] : b;
+        const bR = px < TERRAIN_RES - 1 ? biomes[idx + 1] : b;
+        const bU = py > 0 ? biomes[idx - TERRAIN_RES] : b;
+        const bD = py < TERRAIN_RES - 1 ? biomes[idx + TERRAIN_RES] : b;
 
-      const isCoastline = bL === 0 || bR === 0 || bU === 0 || bD === 0;
-      const isBiomeEdge =
-        (bL !== 0 && bL !== b) ||
-        (bR !== 0 && bR !== b) ||
-        (bU !== 0 && bU !== b) ||
-        (bD !== 0 && bD !== b);
-
-      if (isCoastline) {
-        // Crisp dark cartographic shoreline
-        r = 36;
-        g = 32;
-        bl = 26;
-      } else if (showBorders && isBiomeEdge) {
-        // Clearly defined Biome Boundary line!
-        const bCol = BIOME_BORDER_RGB[b] || [254, 240, 138];
-        r = bCol[0];
-        g = bCol[1];
-        bl = bCol[2];
-      } else if (showBorders) {
-        // Check 2px neighbor for dark outer casing around biome borders so the border pops against any terrain
-        const bL2 = px > 1 ? biomes[idx - 2] : b;
-        const bR2 = px < TERRAIN_RES - 2 ? biomes[idx + 2] : b;
-        const bU2 = py > 1 ? biomes[idx - TERRAIN_RES * 2] : b;
-        const bD2 = py < TERRAIN_RES - 2 ? biomes[idx + TERRAIN_RES * 2] : b;
-        if (
-          (bL2 !== 0 && bL2 !== b) ||
-          (bR2 !== 0 && bR2 !== b) ||
-          (bU2 !== 0 && bU2 !== b) ||
-          (bD2 !== 0 && bD2 !== b)
-        ) {
-          r *= 0.35;
-          g *= 0.35;
-          bl *= 0.35;
+        const isBorder = (bL !== b && bL > 0) || (bR !== b && bR > 0) || (bU !== b && bU > 0) || (bD !== b && bD > 0);
+        if (isBorder) {
+          const borderRgb = BIOME_BORDER_RGB[b] || [255, 255, 255];
+          r = r * 0.28 + borderRgb[0] * 0.72;
+          g = g * 0.28 + borderRgb[1] * 0.72;
+          bl = bl * 0.28 + borderRgb[2] * 0.72;
         }
       }
 
-      // Accumulate biome sector centroids (quantized into a 4x4 grid of sectors for clean region labels)
-      const secX = Math.floor((px / TERRAIN_RES) * 4);
-      const secY = Math.floor((py / TERRAIN_RES) * 4);
-      const secKey = `${secX}_${secY}_${b}`;
-      if (!regionAccum[secKey]) {
-        regionAccum[secKey] = { b, sumX: 0, sumY: 0, count: 0 };
+      const worldRadius = wm.worldRadius || 10500;
+      const wx = nx * worldRadius;
+      const wz = nz * worldRadius;
+      if (b > 0) {
+        const cellX = Math.floor(px / 50);
+        const cellY = Math.floor(py / 50);
+        const key = `${b}-${cellX}-${cellY}`;
+        if (!regionAccum[key]) {
+          regionAccum[key] = { b, sumX: 0, sumZ: 0, count: 0 };
+        }
+        regionAccum[key].sumX += wx;
+        regionAccum[key].sumZ += wz;
+        regionAccum[key].count++;
       }
-      regionAccum[secKey].sumX += px;
-      regionAccum[secKey].sumY += py;
-      regionAccum[secKey].count++;
 
       pixels[pIdx] = Math.max(0, Math.min(255, Math.round(r)));
       pixels[pIdx + 1] = Math.max(0, Math.min(255, Math.round(g)));
@@ -2053,95 +2649,50 @@ function ensureValheimTerrainCache(wm) {
     }
   }
 
-  octx.putImageData(imgData, 0, 0);
-
-  // Select significant biome regions for on-map Biome Labels
   cachedBiomeLabels = Object.values(regionAccum)
-    .filter((reg) => reg.count > 480)
-    .map((reg) => {
-      const avgPx = reg.sumX / reg.count;
-      const avgPy = reg.sumY / reg.count;
-      const cPx = Math.max(0, Math.min(TERRAIN_RES - 1, Math.round(avgPx)));
-      const cPy = Math.max(0, Math.min(TERRAIN_RES - 1, Math.round(avgPy)));
-      const actualBiomeAtCentroid = biomes[cPy * TERRAIN_RES + cPx];
-      const wx = ((avgPx / (TERRAIN_RES - 1)) * 2.0 - 1.0) * 10500;
-      const wz = (1.0 - (avgPy / (TERRAIN_RES - 1)) * 2.0) * 10500;
-      return {
-        biomeCode: reg.b,
-        actualBiomeAtCentroid,
-        name: (BIOME_NAMES_BY_CODE[reg.b] || 'Meadows').toUpperCase(),
-        wx,
-        wz,
-        distFromSpawn: Math.hypot(wx, wz),
-        count: reg.count
-      };
-    })
-    .filter((lbl) => {
-      // Never allow a non-Meadows label inside 750m of Spawn (0,0), and require centroid to sit inside its own biome
-      if (lbl.distFromSpawn < 750 && lbl.biomeCode !== 1) return false;
-      if (lbl.distFromSpawn < 1100 && lbl.biomeCode === 4) return false;
-      return lbl.actualBiomeAtCentroid === lbl.biomeCode;
-    });
+    .filter((reg) => reg.count > 450)
+    .map((reg) => ({
+      name: (BIOME_NAMES_BY_CODE[reg.b] || '').toUpperCase(),
+      wx: reg.sumX / reg.count,
+      wz: reg.sumZ / reg.count,
+      count: reg.count
+    }));
 
-  // Guarantee a prominent MEADOWS label on the central starting island near spawn
-  if (!cachedBiomeLabels.some((l) => l.biomeCode === 1 && l.distFromSpawn < 700)) {
-    cachedBiomeLabels.unshift({
-      biomeCode: 1,
-      name: 'MEADOWS',
-      wx: 0,
-      wz: -280,
-      count: 1200
-    });
-  }
-
-  cachedTerrainCanvas = off;
-  return off;
+  ctx.putImageData(imgData, 0, 0);
+  cachedTerrainCanvas = canvas;
+  cachedTerrainSeed = seedKey;
+  return canvas;
 }
 
 function drawValheimMapIcon(ctx, type, name, x, y) {
   ctx.save();
   ctx.translate(x, y);
 
-  // Drop shadow for crisp readability over any terrain (matching Screenshot 1)
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.92)';
-  ctx.shadowBlur = 4;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 1;
-
   if (type === 'spawn') {
-    // Authentic Valheim Sacrificial Stones icon: Central ring + 5 standing stones around it
-    ctx.fillStyle = '#f8fafc';
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2.4;
     ctx.beginPath();
-    ctx.arc(0, 0, 4.5, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.arc(0, 0, 7.5, 0, Math.PI * 2);
     ctx.stroke();
-
-    for (let i = 0; i < 5; i++) {
-      const ang = (i / 5) * Math.PI * 2 - Math.PI / 2;
-      const sx = Math.cos(ang) * 9.5;
-      const sy = Math.sin(ang) * 9.5;
-      ctx.beginPath();
-      ctx.moveTo(sx - 2, sy + 2.5);
-      ctx.lineTo(sx - 1, sy - 3);
-      ctx.lineTo(sx + 1, sy - 3);
-      ctx.lineTo(sx + 2, sy + 2.5);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    }
+    ctx.fillStyle = '#0f172a';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(0, -6);
+    ctx.lineTo(0, 6);
+    ctx.moveTo(-6, 0);
+    ctx.lineTo(6, 0);
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
   } else if (type === 'boss') {
-    // Authentic Valheim Horned Boss Altar icon (like EIKTHYR in Screenshot 1)
-    ctx.fillStyle = '#f8fafc';
-    ctx.strokeStyle = '#0f172a';
+    ctx.fillStyle = '#b91c1c';
+    ctx.strokeStyle = '#fef2f2';
     ctx.lineWidth = 1.8;
     ctx.beginPath();
     ctx.arc(0, 2, 4.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
 
-    // Left & Right Curved Horns
     ctx.beginPath();
     ctx.moveTo(-3, 0);
     ctx.quadraticCurveTo(-9, -2, -6, -8);
@@ -2152,7 +2703,6 @@ function drawValheimMapIcon(ctx, type, name, x, y) {
     ctx.fill();
     ctx.stroke();
   } else if (type === 'portal' || type === 'home') {
-    // Authentic Valheim Viking Gable House / Portal icon (like HOME in Screenshot 1)
     ctx.fillStyle = type === 'portal' ? '#e0f2fe' : '#f8fafc';
     ctx.strokeStyle = '#0f172a';
     ctx.lineWidth = 1.6;
@@ -2171,11 +2721,9 @@ function drawValheimMapIcon(ctx, type, name, x, y) {
     ctx.fillStyle = type === 'portal' ? '#0284c7' : '#1e293b';
     ctx.fillRect(-1.8, 1, 3.6, 5);
   } else if (type === 'tombstone') {
-    // Authentic Valheim Skull & Crossbones death marker (like DAY 3 in Screenshot 1)
     ctx.fillStyle = '#f8fafc';
     ctx.strokeStyle = '#0f172a';
     ctx.lineWidth = 1.5;
-    // Crossbones
     ctx.beginPath();
     ctx.moveTo(-6, -4);
     ctx.lineTo(6, 5);
@@ -2184,14 +2732,14 @@ function drawValheimMapIcon(ctx, type, name, x, y) {
     ctx.strokeStyle = '#f8fafc';
     ctx.lineWidth = 2.4;
     ctx.stroke();
-    // Skull cranium
+
     ctx.strokeStyle = '#0f172a';
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.arc(0, -1.5, 4.5, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-    // Eye sockets
+
     ctx.fillStyle = '#0f172a';
     ctx.beginPath();
     ctx.arc(-1.6, -1.8, 1.1, 0, Math.PI * 2);
@@ -2230,7 +2778,6 @@ function drawValheimMap() {
     y: cy - (wz / worldRadius) * R
   });
 
-  // 1. Aged Norse Parchment Table Background outside the world disc
   const parchmentCanvas = getParchmentCanvas();
   ctx.clearRect(0, 0, w, h);
   const parchPat = ctx.createPattern(parchmentCanvas, 'repeat');
@@ -2239,18 +2786,15 @@ function drawValheimMap() {
   ctx.fillStyle = 'rgba(12, 16, 24, 0.55)';
   ctx.fillRect(0, 0, w, h);
 
-  // Save & clip to circular Valheim world disc
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, R, 0, Math.PI * 2);
   ctx.clip();
 
-  // 2. Draw High-Resolution 600x600 Pixel Terrain, Coastlines, Forests & Biome Boundaries
   const terrainCanvas = ensureValheimTerrainCache(wm);
   ctx.imageSmoothingEnabled = true;
   ctx.drawImage(terrainCanvas, cx - R, cy - R, R * 2, R * 2);
 
-  // 2b. Render Clean Biome Region Labels when Biome Borders toggle is checked
   const showBorders = document.getElementById('toggleBiomeBorders')?.checked !== false;
   if (showBorders && cachedBiomeLabels.length > 0) {
     ctx.save();
@@ -2269,7 +2813,6 @@ function drawValheimMap() {
     ctx.restore();
   }
 
-  // 3. Authentic Valheim Parchment Fog-of-War Overlay (when enabled)
   const showFog = document.getElementById('toggleFogOfWar')?.checked === true;
   if (showFog) {
     const offCanvas = document.createElement('canvas');
@@ -2277,12 +2820,10 @@ function drawValheimMap() {
     offCanvas.height = h;
     const fctx = offCanvas.getContext('2d');
 
-    // Fill with warm Valheim parchment texture (matching Screenshot 1!)
     const fPat = fctx.createPattern(parchmentCanvas, 'repeat');
     fctx.fillStyle = fPat || '#baa274';
     fctx.fillRect(0, 0, w, h);
 
-    // Punch out discovered zones + active player exploration radii with soft feathered edges
     fctx.globalCompositeOperation = 'destination-out';
     const zones = [...(wm.discoveredZones || [])];
     for (const lp of Object.values(wm.livePlayers || {})) {
@@ -2305,7 +2846,6 @@ function drawValheimMap() {
     ctx.drawImage(offCanvas, 0, 0);
   }
 
-  // 4. Portal / Home Network Layer
   if (document.getElementById('togglePortals')?.checked !== false) {
     const hub = toScreen(45, 60);
     for (const p of wm.portals || []) {
@@ -2324,7 +2864,6 @@ function drawValheimMap() {
     }
   }
 
-  // 5. Boss Altars, Traders & Sacrificial Stones (In-Game Style Icons)
   if (document.getElementById('toggleBosses')?.checked !== false) {
     for (const lm of wm.landmarks || []) {
       const pt = toScreen(lm.x, lm.z);
@@ -2333,7 +2872,6 @@ function drawValheimMap() {
     }
   }
 
-  // 6. Active Death Tombstones (In-Game Skull & Crossbones Marker)
   if (document.getElementById('toggleTombstones')?.checked !== false) {
     for (const tomb of wm.tombstones || []) {
       const pt = toScreen(tomb.x, tomb.z);
@@ -2341,13 +2879,11 @@ function drawValheimMap() {
     }
   }
 
-  // 7. Live Vikings (Movement Trails + In-Game Golden/Emerald Marker + Live HP Bar + Nameplate)
   const livePlayers = wm.livePlayersList || Object.values(wm.livePlayers || {});
   for (const lp of livePlayers) {
-    if (lp.hasGps === false) continue; // Do not plot marker at spawn if GPS is inactive!
+    if (lp.hasGps === false) continue;
     const pt = toScreen(lp.x, lp.z);
 
-    // Draw breadcrumb movement trail
     if (Array.isArray(lp.trail) && lp.trail.length > 1) {
       ctx.beginPath();
       lp.trail.forEach((t, idx) => {
@@ -2360,13 +2896,11 @@ function drawValheimMap() {
       ctx.stroke();
     }
 
-    // Glowing aura
     ctx.beginPath();
     ctx.arc(pt.x, pt.y, 13, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(250, 204, 21, 0.25)';
     ctx.fill();
 
-    // In-game style Viking directional chevron / pin
     ctx.save();
     ctx.translate(pt.x, pt.y);
     ctx.rotate(((lp.heading || 0) * Math.PI) / 180);
@@ -2383,7 +2917,6 @@ function drawValheimMap() {
     ctx.stroke();
     ctx.restore();
 
-    // Floating Nameplate + Live Health Bar above player
     const barW = 60;
     const barH = 5;
     const bx = pt.x - barW / 2;
@@ -2399,11 +2932,9 @@ function drawValheimMap() {
     ctx.fillText(lp.name, pt.x, by - 4);
     ctx.restore();
 
-    // HP Bar Track
     ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
     ctx.fillRect(bx - 1, by - 1, barW + 2, barH + 2);
 
-    // HP Bar Fill
     const hpRatio = Math.max(0.08, Math.min(1, (lp.hp || 100) / Math.max(1, lp.maxHp || 100)));
     ctx.fillStyle = hpRatio < 0.45 ? '#ef4444' : '#22c55e';
     ctx.fillRect(bx, by, barW * hpRatio, barH);
@@ -2411,7 +2942,6 @@ function drawValheimMap() {
 
   ctx.restore();
 
-  // Outer World Rim Border
   ctx.beginPath();
   ctx.arc(cx, cy, R, 0, Math.PI * 2);
   ctx.strokeStyle = 'rgba(217, 179, 114, 0.85)';
@@ -2441,6 +2971,7 @@ async function triggerAutoConfigureServer() {
     }
 
     showToast('⚡ Auto-configuring Valheim Server (creating safety backup & installing BepInEx)...');
+    playSfx('save');
     const res = await fetch('/api/server/autoconfigure', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' }
@@ -2460,6 +2991,7 @@ async function triggerAutoConfigureServer() {
       renderAll();
     }
     showToast(`✅ ${data.message}`);
+    playSfx('save');
   } catch (err) {
     if (logBox) {
       logBox.classList.remove('hidden');
