@@ -2162,8 +2162,11 @@ function renderLiveMapAndVitals() {
         if (autoBtn && !autoBtn.disabled) {
           autoBtn.textContent = '🔄 Re-Sync / Verify Plugin';
         }
+      } else if (wm.pluginStatus === 'configuring_and_restarting_server') {
+        statusBadge.textContent = '⏳ Restarting Server (~45-60s)...';
+        statusBadge.className = 'role-badge role-permitted';
       } else {
-        statusBadge.textContent = '⏳ Server Booting World (~45-60s)...';
+        statusBadge.textContent = '⏳ Server Loading World (~45-60s)...';
         statusBadge.className = 'role-badge role-permitted';
       }
     } else {
@@ -2188,17 +2191,17 @@ function renderLiveMapAndVitals() {
     } else {
       vitalsList.innerHTML = livePlayers
         .map((lp) => {
-          const hasGps = lp.hasGps !== false;
+          const hasGps = lp.hasGps !== false && (lp.x !== 0 || lp.z !== 0);
           const hpPct = Math.max(5, Math.min(100, Math.round((lp.hp / Math.max(1, lp.maxHp)) * 100)));
           const stamPct = Math.max(5, Math.min(100, Math.round((lp.stamina / Math.max(1, lp.maxStamina)) * 100)));
           const resolvedBiome = hasGps
             ? (Math.hypot(lp.x || 0, lp.z || 0) < 600
                 ? 'Meadows'
                 : estimateClientBiome(lp.x || 0, lp.z || 0) || lp.biome || 'Meadows')
-            : 'Awaiting BepInEx GPS';
+            : (lp.biome || 'Awaiting BepInEx GPS');
           const posText = hasGps
             ? `📍 X: ${lp.x}, Y: ${lp.y || 20}, Z: ${lp.z} • ${escapeHtml(lp.activity || 'Exploring')}`
-            : `📡 Awaiting Live GPS (Add BEPINEX=true to docker-compose.yml)`;
+            : `📡 Awaiting Live GPS (${escapeHtml(lp.activity || 'Valheim server loading world save')})`;
           const foodsHtml = (lp.foods || [])
             .map((f) => `<span class="food-chip">🍖 ${escapeHtml(f)}</span>`)
             .join('');
@@ -2220,7 +2223,7 @@ function renderLiveMapAndVitals() {
                 ${
                   hasGps
                     ? `<button class="btn btn-xs btn-amber" onclick="focusMapOnCoords(${lp.x}, ${lp.z}, '${escapeAttr(lp.name)}')">🎯 Track</button>`
-                    : `<button class="btn btn-xs btn-glass" onclick="showToast('⚠️ Add BEPINEX=true to docker-compose.yml to enable live GPS!')">📡 No GPS</button>`
+                    : `<button class="btn btn-xs btn-glass" onclick="showToast('📡 Live GPS signal initializing — Valheim server loading world save...')">📡 Awaiting GPS</button>`
                 }
               </div>
 

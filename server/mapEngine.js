@@ -198,6 +198,30 @@ class ValheimMapEngine {
         }
         this.mapState.pluginStatus = pStatus;
         this.ingestExternalTelemetry(externalData, statusLabel);
+
+        // Fallback: If BepInEx is still loading/booting world or reports 0 players, preserve/show known online players from server logs
+        const knownPlayers = this.configManager.state.players || {};
+        for (const [steamId, p] of Object.entries(knownPlayers)) {
+          if (p.online && !this.mapState.livePlayers[steamId]) {
+            this.mapState.livePlayers[steamId] = {
+              steamId,
+              name: p.name,
+              x: 0,
+              y: 20,
+              z: 0,
+              hasGps: false,
+              heading: 0,
+              hp: 25,
+              maxHp: 25,
+              stamina: 50,
+              maxStamina: 50,
+              biome: 'Awaiting GPS Signal',
+              activity: pStatus === 'loading_world_save' ? 'Valheim server loading world save...' : 'Online',
+              foods: [],
+              trail: []
+            };
+          }
+        }
         return;
       } catch (_) {}
     }
@@ -310,12 +334,17 @@ class ValheimMapEngine {
 
         const px = Math.round(p.x || 0);
         const pz = Math.round(p.z || 0);
+        const hasGps = p.hasGps !== false && (px !== 0 || pz !== 0);
         const pDist = Math.hypot(px, pz);
         let resolvedBiome = p.biome || this.estimateBiome(px, pz);
-        if (pDist < 600) {
-          resolvedBiome = 'Meadows';
-        } else if (pDist < 1000 && resolvedBiome.includes('Mountain')) {
-          resolvedBiome = 'Black Forest';
+        if (hasGps) {
+          if (pDist < 600) {
+            resolvedBiome = 'Meadows';
+          } else if (pDist < 1000 && resolvedBiome.includes('Mountain')) {
+            resolvedBiome = 'Black Forest';
+          }
+        } else {
+          resolvedBiome = 'Awaiting GPS Signal';
         }
 
         nextLive[key] = {
@@ -324,6 +353,7 @@ class ValheimMapEngine {
           x: px,
           y: Math.round(p.y || 0),
           z: pz,
+          hasGps,
           heading: Math.round(p.heading || 0),
           hp: Math.round(p.hp ?? 100),
           maxHp: Math.round(p.maxHp ?? 100),
@@ -331,33 +361,41 @@ class ValheimMapEngine {
           maxStamina: Math.round(p.maxStamina ?? 100),
           eitr: Math.round(p.eitr ?? 0),
           biome: resolvedBiome,
-          activity: p.activity || 'Exploring',
+          activity: p.activity || (hasGps ? 'Exploring' : 'Online'),
           foods: p.foods || [],
           trail
         };
 
-        this.recordExplorationPoint(px, pz, p.name || 'Viking');
-      }
-      this.mapState.livePlayers = nextLive;
-
-      // Reconcile with configManager.state.players:
-      // If BepInEx telemetry is reporting, any player marked online in state.players who is NOT in payload.players is offline
-      let reconciled = false;
-      const nowStr = new Date().toISOString();
-      for (const [key, playerRecord] of Object.entries(this.configManager.state.players)) {
-        if (playerRecord && playerRecord.online) {
-          const isPresent =
-            activeIds.has(playerRecord.steamId) ||
-            activeIds.has(key) ||
-            activeNames.has(String(playerRecord.name || '').toLowerCase());
-          if (!isPresent) {
-            this.configManager.finalizePlayerSession(playerRecord, nowStr);
-            reconciled = true;
-          }
+        if (hasGps) {
+          this.recordExplorationPoint(px, pz, p.name || 'Viking');
         }
       }
-      if (reconciled) {
-        this.configManager.saveState();
+
+      if (payload.pluginStatus === 'active') {
+        this.mapState.livePlayers = nextLive;
+
+        // Reconcile with configManager.state.players:
+        // ONLY reconcile if BepInEx plugin telemetry is actively running in-world!
+        let reconciled = false;
+        const nowStr = new Date().toISOString();
+        for (const [key, playerRecord] of Object.entries(this.configManager.state.players)) {
+          if (playerRecord && playerRecord.online) {
+            const isPresent =
+              activeIds.has(playerRecord.steamId) ||
+              activeIds.has(key) ||
+              activeNames.has(String(playerRecord.name || '').toLowerCase());
+            if (!isPresent) {
+              this.configManager.finalizePlayerSession(playerRecord, nowStr);
+              reconciled = true;
+            }
+          }
+        }
+        if (reconciled) {
+          this.configManager.saveState();
+        }
+      } else {
+        // If BepInEx is still booting/loading world save, preserve existing online players
+        this.mapState.livePlayers = { ...this.mapState.livePlayers, ...nextLive };
       }
     }
     if (Array.isArray(payload.portals)) this.mapState.portals = payload.portals;

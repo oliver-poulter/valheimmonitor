@@ -574,10 +574,12 @@ class ConfigManager {
     // 3. Check live telemetry heartbeat for WatchtowerMapExporter
     let liveMapFresh = false;
     let liveMapAgeSeconds = null;
+    let liveMapPluginStatus = null;
     const liveMapPath = path.join(this.watchtowerDir, 'live_map.json');
     if (fs.existsSync(liveMapPath)) {
       try {
         const lm = JSON.parse(fs.readFileSync(liveMapPath, 'utf8'));
+        liveMapPluginStatus = lm ? lm.pluginStatus : null;
         const rawTime = lm && (lm.lastUpdated || lm.timestamp);
         if (lm && rawTime) {
           const ageMs = Date.now() - new Date(rawTime).getTime();
@@ -625,20 +627,31 @@ class ConfigManager {
           } else {
             // Check real runtime proof per mod
             if (entry.name === 'WatchtowerMapExporter.dll') {
+              const loadedInLogs =
+                logOutputContent.includes('watchtower') ||
+                loadedFromLogs.has('watchtowermapexporter') ||
+                loadedFromLogs.has('heimdall watchtower map exporter');
+
               if (liveMapFresh) {
                 status = 'active';
                 verificationType = 'live_heartbeat';
                 verificationDetail = `Live telemetry heartbeat verified (${liveMapAgeSeconds}s ago)`;
-              } else if (liveMapAgeSeconds !== null) {
-                if (liveMapAgeSeconds < 60) {
-                  status = 'active';
-                  verificationType = 'live_heartbeat';
-                  verificationDetail = `Plugin active & exporting telemetry (${liveMapAgeSeconds}s ago)`;
+              } else if (liveMapAgeSeconds !== null && liveMapAgeSeconds < 120) {
+                status = 'active';
+                verificationType = 'live_heartbeat';
+                if (liveMapPluginStatus === 'loading_world_save' || liveMapPluginStatus === 'plugin_loaded_booting_world') {
+                  verificationDetail = `BepInEx active & verified — Valheim initializing world telemetry (${liveMapAgeSeconds}s ago)`;
                 } else {
-                  status = 'standby';
-                  verificationType = 'stale_heartbeat';
-                  verificationDetail = `Telemetry heartbeat stale (${liveMapAgeSeconds}s ago)`;
+                  verificationDetail = `Plugin active & exporting telemetry (${liveMapAgeSeconds}s ago)`;
                 }
+              } else if (loadedInLogs) {
+                status = 'active';
+                verificationType = 'runtime_confirmed';
+                verificationDetail = 'Verified loaded via BepInEx runtime log';
+              } else if (liveMapAgeSeconds !== null) {
+                status = 'standby';
+                verificationType = 'stale_heartbeat';
+                verificationDetail = `Telemetry heartbeat stale (${liveMapAgeSeconds}s ago)`;
               }
             } else if (entry.name === 'SpreadTheLoad.dll') {
               if (

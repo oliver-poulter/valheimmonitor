@@ -100,21 +100,36 @@ namespace HeimdallWatchtower
             {
                 ExportWorldAndPlayers();
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore transient startup frame exceptions
+                Logger.LogError("[Heimdall Watchtower] ExportWorldAndPlayers error: " + ex);
             }
         }
 
         private void ResolveTypes()
         {
-            if (_znetType != null && _zdoManType != null && _worldGenType != null) return;
+            if (_znetType != null && _zdoManType != null && _worldGenType != null && _zoneSysType != null) return;
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
-                if (_znetType == null) _znetType = asm.GetType("ZNet");
-                if (_zdoManType == null) _zdoManType = asm.GetType("ZDOMan");
-                if (_worldGenType == null) _worldGenType = asm.GetType("WorldGenerator");
-                if (_zoneSysType == null) _zoneSysType = asm.GetType("ZoneSystem");
+                try
+                {
+                    if (_znetType == null) _znetType = asm.GetType("ZNet");
+                    if (_zdoManType == null) _zdoManType = asm.GetType("ZDOMan");
+                    if (_worldGenType == null) _worldGenType = asm.GetType("WorldGenerator");
+                    if (_zoneSysType == null) _zoneSysType = asm.GetType("ZoneSystem");
+
+                    if (_znetType == null || _zdoManType == null || _worldGenType == null || _zoneSysType == null)
+                    {
+                        foreach (var t in asm.GetTypes())
+                        {
+                            if (_znetType == null && t.Name == "ZNet") _znetType = t;
+                            if (_zdoManType == null && t.Name == "ZDOMan") _zdoManType = t;
+                            if (_worldGenType == null && t.Name == "WorldGenerator") _worldGenType = t;
+                            if (_zoneSysType == null && t.Name == "ZoneSystem") _zoneSysType = t;
+                        }
+                    }
+                }
+                catch { }
             }
         }
 
@@ -122,17 +137,23 @@ namespace HeimdallWatchtower
         {
             if (t == null) return null;
             const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.FlattenHierarchy;
-            try
-            {
-                var prop = t.GetProperty("instance", flags) ?? t.GetProperty("Instance", flags);
-                if (prop != null)
-                {
-                    var val = prop.GetValue(null, null);
-                    if (val != null) return val;
-                }
-            }
-            catch { }
 
+            // 1. Check known singleton property names
+            foreach (var propName in new[] { "instance", "Instance", "s_instance", "_instance" })
+            {
+                try
+                {
+                    var prop = t.GetProperty(propName, flags);
+                    if (prop != null && prop.GetIndexParameters().Length == 0)
+                    {
+                        var val = prop.GetValue(null, null);
+                        if (val != null) return val;
+                    }
+                }
+                catch { }
+            }
+
+            // 2. Check known singleton field names
             foreach (var fieldName in new[] { "instance", "m_instance", "s_instance", "_instance", "Instance" })
             {
                 try
@@ -146,6 +167,95 @@ namespace HeimdallWatchtower
                 }
                 catch { }
             }
+
+            // 3. Scan all static properties returning t
+            try
+            {
+                foreach (var prop in t.GetProperties(flags))
+                {
+                    if (prop.GetIndexParameters().Length == 0 && t.IsAssignableFrom(prop.PropertyType))
+                    {
+                        var val = prop.GetValue(null, null);
+                        if (val != null) return val;
+                    }
+                }
+            }
+            catch { }
+
+            // 4. Scan all static fields of type t
+            try
+            {
+                foreach (var field in t.GetFields(flags))
+                {
+                    if (t.IsAssignableFrom(field.FieldType))
+                    {
+                        var val = field.GetValue(null);
+                        if (val != null) return val;
+                    }
+                }
+            }
+            catch { }
+
+            // 5. Unity Component search fallback: finds any active instance in the scene
+            try
+            {
+                var findMethod = typeof(UnityEngine.Object).GetMethod("FindObjectOfType", new[] { typeof(Type) });
+                if (findMethod != null)
+                {
+                    var val = findMethod.Invoke(null, new object[] { t });
+                    if (val != null) return val;
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private object ResolveZNetInstance()
+        {
+            if (_znetType == null) return null;
+            object inst = GetStaticInstance(_znetType);
+            if (inst != null) return inst;
+
+            // Search ZNetScene, Game, FejdStartup for active ZNet reference
+            foreach (var helperName in new[] { "ZNetScene", "Game", "FejdStartup" })
+            {
+                try
+                {
+                    Type ht = null;
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        ht = asm.GetType(helperName);
+                        if (ht != null) break;
+                    }
+                    if (ht != null)
+                    {
+                        object hInst = GetStaticInstance(ht);
+                        if (hInst != null)
+                        {
+                            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
+                            foreach (var f in ht.GetFields(flags))
+                            {
+                                if (_znetType.IsAssignableFrom(f.FieldType))
+                                {
+                                    object val = f.GetValue(hInst);
+                                    if (val != null) return val;
+                                }
+                            }
+                            foreach (var p in ht.GetProperties(flags))
+                            {
+                                if (_znetType.IsAssignableFrom(p.PropertyType) && p.GetIndexParameters().Length == 0)
+                                {
+                                    object val = p.GetValue(hInst, null);
+                                    if (val != null) return val;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
             return null;
         }
 
@@ -486,7 +596,7 @@ namespace HeimdallWatchtower
                 return;
             }
 
-            var znetInstance = GetStaticInstance(_znetType);
+            var znetInstance = ResolveZNetInstance();
             if (znetInstance == null)
             {
                 WriteBootstrapStatus("loading_world_save");
@@ -494,10 +604,12 @@ namespace HeimdallWatchtower
             }
 
             var zdoManInstance = GetStaticInstance(_zdoManType)
-                              ?? _znetType.GetField("m_zdoMan", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInstance);
+                              ?? _znetType.GetField("m_zdoMan", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInstance)
+                              ?? _znetType.GetProperty("m_zdoMan", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInstance, null);
 
             string worldName = _znetType.GetMethod("GetWorldName")?.Invoke(znetInstance, null) as string ?? "Dedicated";
-            var peersObj = _znetType.GetMethod("GetPeers")?.Invoke(znetInstance, null) as IEnumerable;
+            var peersObj = _znetType.GetMethod("GetPeers", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.Invoke(znetInstance, null) as IEnumerable
+                        ?? _znetType.GetField("m_peers", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInstance) as IEnumerable;
 
             // Query ZNet.GetPlayerList() as an authoritative coordinate source
             var playerListPositions = new System.Collections.Generic.Dictionary<string, UnityEngine.Vector3>(StringComparer.OrdinalIgnoreCase);
@@ -551,6 +663,7 @@ namespace HeimdallWatchtower
             sb.Append("  \"players\": [\n");
 
             bool first = true;
+            var processedNames = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (peersObj != null)
             {
                 foreach (var peer in peersObj)
@@ -574,6 +687,19 @@ namespace HeimdallWatchtower
                     if (socketObj != null)
                     {
                         steamId = socketObj.GetType().GetMethod("GetHostName")?.Invoke(socketObj, null) as string ?? "";
+                    }
+                    if (string.IsNullOrEmpty(steamId))
+                    {
+                        try
+                        {
+                            object uidObj = peerType.GetField("m_uid", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(peer);
+                            if (uidObj != null)
+                            {
+                                long uid = Convert.ToInt64(uidObj);
+                                if (uid > 0) steamId = uid.ToString();
+                            }
+                        }
+                        catch { }
                     }
                     string stateKey = !string.IsNullOrEmpty(steamId) ? steamId : playerName;
 
@@ -726,6 +852,7 @@ namespace HeimdallWatchtower
                     pState.LastZ = z;
                     pState.LastHp = hp;
                     pState.Initialized = true;
+                    processedNames.Add(playerName);
 
                     if (!first) sb.Append(",\n");
                     first = false;
@@ -736,6 +863,98 @@ namespace HeimdallWatchtower
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"x\": {0:F1},\n", x);
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"y\": {0:F1},\n", y);
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"z\": {0:F1},\n", z);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"heading\": {0:F0},\n", pState.Heading);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"hp\": {0:F0},\n", hp);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxHp\": {0:F0},\n", maxHp);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"stamina\": {0:F0},\n", stamina);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxStamina\": {0:F0},\n", maxStamina);
+                    sb.AppendFormat("      \"activity\": \"{0}\"\n", EscapeJson(activity));
+                    sb.Append("    }");
+                }
+            }
+
+            // Fallback: Check ZNet.GetPlayerList() for connected players who may not be in peersObj
+            if (playerListObj != null)
+            {
+                foreach (var pi in playerListObj)
+                {
+                    if (pi == null) continue;
+                    var piType = pi.GetType();
+                    string piName = piType.GetField("m_name", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pi) as string;
+                    if (string.IsNullOrEmpty(piName) || processedNames.Contains(piName)) continue;
+                    processedNames.Add(piName);
+
+                    object piPosObj = piType.GetField("m_position", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pi);
+                    object piCharIdObj = piType.GetField("m_characterID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pi);
+
+                    float px = 0f, py = 0f, pz = 0f;
+                    TryExtractVector3(piPosObj, out px, out py, out pz);
+
+                    float rawHp = -1f, rawMaxHp = -1f, rawStamina = -1f, rawMaxStamina = -1f, zdoNoise = 0f;
+                    if (piCharIdObj != null && getZdoMethod != null && zdoManInstance != null)
+                    {
+                        try
+                        {
+                            object zdo = getZdoMethod.Invoke(zdoManInstance, new[] { piCharIdObj });
+                            if (zdo != null)
+                            {
+                                var zdoType = zdo.GetType();
+                                object zdoPos = zdoType.GetMethod("GetPosition", Type.EmptyTypes)?.Invoke(zdo, null)
+                                             ?? zdoType.GetMethod("GetPosition")?.Invoke(zdo, null)
+                                             ?? zdoType.GetField("m_position", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(zdo);
+                                if (TryExtractVector3(zdoPos, out float zx, out float zy, out float zz) && (zx != 0f || zz != 0f))
+                                {
+                                    px = zx; py = zy; pz = zz;
+                                }
+                                rawHp = ReadZdoFloat(zdo, "health", -1f);
+                                rawMaxHp = ReadZdoFloat(zdo, "max_health", -1f);
+                                rawStamina = ReadZdoFloat(zdo, "stamina", -1f);
+                                rawMaxStamina = ReadZdoFloat(zdo, "max_stamina", -1f);
+                                zdoNoise = ReadZdoFloat(zdo, "noise", 0f);
+                            }
+                        }
+                        catch { }
+                    }
+
+                    float maxHp = rawMaxHp > 0f ? rawMaxHp : (rawHp > 25f ? rawHp : 25f);
+                    float hp = rawHp > 0f ? rawHp : maxHp;
+                    if (hp > maxHp) maxHp = hp;
+
+                    PeerVitalState pState;
+                    if (!_vitalStates.TryGetValue(piName, out pState))
+                    {
+                        pState = new PeerVitalState();
+                        _vitalStates[piName] = pState;
+                    }
+
+                    float dx = pState.Initialized ? (px - pState.LastX) : 0f;
+                    float dz = pState.Initialized ? (pz - pState.LastZ) : 0f;
+                    float horizDist = (float)Math.Sqrt(dx * dx + dz * dz);
+                    float speedMps = horizDist / ExportIntervalSeconds;
+                    if (horizDist > 0.4f)
+                    {
+                        pState.Heading = (float)(((Math.Atan2(dx, dz) * 180.0) / Math.PI + 360.0) % 360.0);
+                    }
+
+                    float maxStamina = rawMaxStamina > 0f ? rawMaxStamina : (maxHp <= 25.5f ? 50f : (float)Math.Round(50f + (maxHp - 25f) * 0.85f));
+                    float stamina = rawStamina >= 0f ? rawStamina : maxStamina;
+                    string activity = "Exploring";
+                    if (pState.Initialized && hp < pState.LastHp - 0.5f) activity = "In Combat (Taking Damage!)";
+                    else if (zdoNoise >= 30f) activity = "Combat / Harvesting";
+                    else if (speedMps > 4.3f) activity = string.Format(CultureInfo.InvariantCulture, "Sprinting ({0:F1} m/s)", speedMps);
+                    else if (speedMps > 0.5f) activity = string.Format(CultureInfo.InvariantCulture, "Hiking ({0:F1} m/s)", speedMps);
+
+                    pState.LastX = px; pState.LastY = py; pState.LastZ = pz; pState.LastHp = hp; pState.Initialized = true;
+
+                    if (!first) sb.Append(",\n");
+                    first = false;
+
+                    sb.Append("    {\n");
+                    sb.AppendFormat("      \"steamId\": \"{0}\",\n", EscapeJson(piName));
+                    sb.AppendFormat("      \"name\": \"{0}\",\n", EscapeJson(piName));
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"x\": {0:F1},\n", px);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"y\": {0:F1},\n", py);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"z\": {0:F1},\n", pz);
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"heading\": {0:F0},\n", pState.Heading);
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"hp\": {0:F0},\n", hp);
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxHp\": {0:F0},\n", maxHp);

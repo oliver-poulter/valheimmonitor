@@ -246,8 +246,14 @@ class ValheimLogParser {
     if (lowerBody.includes('serverdevcommands') || lowerBody.includes('server devcommands')) {
       this.loadedBepInExPlugins.add('serverdevcommands');
     }
-    if (lowerBody.includes('watchtowermapexporter')) {
+    if (
+      lowerBody.includes('watchtowermapexporter') ||
+      lowerBody.includes('heimdall watchtower') ||
+      lowerBody.includes('watchtower map exporter') ||
+      lowerBody.includes('com.watchtower.valheim.mapexporter')
+    ) {
       this.loadedBepInExPlugins.add('watchtowermapexporter');
+      this.loadedBepInExPlugins.add('heimdall watchtower map exporter');
     }
     const bepinexPluginMatch = body.match(/\[(?:Info|Message)\s*:\s*BepInEx\]\s*(?:Loading\s*\[(.+?)(?:\s+[\d\.]+)?\]|Loaded\s*\[(.+?)\])/i);
     if (bepinexPluginMatch) {
