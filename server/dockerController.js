@@ -83,7 +83,7 @@ class DockerController {
               // Also check inside valheim-server container if SpreadTheLoad.dll is present
               let containerMissingMods = false;
               try {
-                const checkRes = await this.execInContainer(['/bin/bash', '-c', 'test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && echo "PRESENT"']);
+                const checkRes = await this.execInContainer(['/bin/bash', '-c', 'test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && test -f /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll && echo "PRESENT"']);
                 if (!checkRes || !checkRes.includes('PRESENT')) {
                   containerMissingMods = true;
                 }

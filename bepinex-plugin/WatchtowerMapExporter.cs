@@ -65,7 +65,11 @@ namespace HeimdallWatchtower
                 sb.AppendFormat("  \"pluginStatus\": \"{0}\",\n", EscapeJson(status));
                 sb.Append("  \"pluginVersion\": \"1.5.0\",\n");
                 sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
-                sb.Append("  \"players\": []\n}\n");
+                sb.AppendFormat("  \"timestamp\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
+                sb.Append("  \"players\": [],\n");
+                sb.Append("  \"landmarks\": [\n");
+                sb.Append("    { \"id\": \"lm-0\", \"type\": \"spawn\", \"name\": \"Sacrificial Stones\", \"icon\": \"🏛️\", \"biome\": \"Meadows\", \"x\": 0, \"z\": 0 }\n");
+                sb.Append("  ]\n}\n");
                 AtomicWriteText(OutputPath, sb.ToString());
             }
             catch
@@ -114,15 +118,44 @@ namespace HeimdallWatchtower
             }
         }
 
+        private static object GetStaticInstance(Type t)
+        {
+            if (t == null) return null;
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.FlattenHierarchy;
+            try
+            {
+                var prop = t.GetProperty("instance", flags) ?? t.GetProperty("Instance", flags);
+                if (prop != null)
+                {
+                    var val = prop.GetValue(null, null);
+                    if (val != null) return val;
+                }
+            }
+            catch { }
+
+            foreach (var fieldName in new[] { "instance", "m_instance", "s_instance", "_instance", "Instance" })
+            {
+                try
+                {
+                    var field = t.GetField(fieldName, flags);
+                    if (field != null)
+                    {
+                        var val = field.GetValue(null);
+                        if (val != null) return val;
+                    }
+                }
+                catch { }
+            }
+            return null;
+        }
+
         private void StepTerrainExport()
         {
             ResolveTypes();
             if (_worldGenType == null || _znetType == null) return;
 
-            var wgInstance = _worldGenType.GetProperty("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null)
-                          ?? _worldGenType.GetField("m_instance", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
-            var znetInstance = _znetType.GetProperty("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null)
-                            ?? _znetType.GetField("m_instance", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
+            var wgInstance = GetStaticInstance(_worldGenType);
+            var znetInstance = GetStaticInstance(_znetType);
 
             if (wgInstance == null || znetInstance == null) return;
 
@@ -232,73 +265,125 @@ namespace HeimdallWatchtower
         private void AppendZoneLandmarks(StringBuilder sb)
         {
             bool first = true;
+            int count = 0;
             try
             {
-                if (_zoneSysType == null) return;
-                var zsInstance = _zoneSysType.GetProperty("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null)
-                              ?? _zoneSysType.GetField("m_instance", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
-                if (zsInstance == null) return;
-
-                var locDict = _zoneSysType.GetField("m_locationInstances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(zsInstance) as IDictionary;
-                if (locDict == null) return;
-
-                int count = 0;
-                foreach (var val in locDict.Values)
+                if (_zoneSysType == null)
                 {
-                    if (val == null) continue;
-                    var vType = val.GetType();
-                    object locObj = vType.GetField("m_location")?.GetValue(val);
-                    object posObj = vType.GetField("m_position")?.GetValue(val);
-                    if (locObj == null || posObj == null) continue;
+                    ResolveTypes();
+                }
 
-                    string prefabName = locObj.GetType().GetField("m_prefabName")?.GetValue(locObj) as string
-                                     ?? locObj.GetType().GetProperty("m_prefabName")?.GetValue(locObj, null) as string
-                                     ?? "";
-                    if (string.IsNullOrEmpty(prefabName))
+                object zsInstance = GetStaticInstance(_zoneSysType);
+                if (zsInstance == null && _znetType != null)
+                {
+                    object znetInst = GetStaticInstance(_znetType);
+                    if (znetInst != null)
                     {
-                        var prefabObj = locObj.GetType().GetField("m_prefab")?.GetValue(locObj)
-                                     ?? locObj.GetType().GetProperty("m_prefab")?.GetValue(locObj, null);
-                        if (prefabObj != null)
-                        {
-                            prefabName = prefabObj.GetType().GetProperty("name")?.GetValue(prefabObj, null) as string ?? "";
-                        }
+                        zsInstance = _znetType.GetField("m_zoneSystem", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInst)
+                                  ?? _znetType.GetProperty("m_zoneSystem", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInst, null);
                     }
-                    if (string.IsNullOrEmpty(prefabName)) continue;
+                }
 
-                    string label = null;
-                    string icon = "📍";
-                    string ltype = "boss";
-                    string biome = "Unknown";
-                    if (prefabName == "StartTemple") { label = "Sacrificial Stones"; icon = "🏛️"; ltype = "spawn"; biome = "Meadows"; }
-                    else if (prefabName.StartsWith("Eikthyrnir")) { label = "EIKTHYR"; icon = "🦌"; biome = "Meadows"; }
-                    else if (prefabName.StartsWith("GDKing")) { label = "THE ELDER"; icon = "🌲"; biome = "Black Forest"; }
-                    else if (prefabName.StartsWith("Bonemass")) { label = "BONEMASS"; icon = "☠️"; biome = "Swamp"; }
-                    else if (prefabName.StartsWith("Dragonqueen")) { label = "MODER"; icon = "🐉"; biome = "Mountains"; }
-                    else if (prefabName.StartsWith("GoblinKing")) { label = "YAGLUTH"; icon = "👑"; biome = "Plains"; }
-                    else if (prefabName.StartsWith("Mistlands_DvergrBossEntrance")) { label = "THE QUEEN"; icon = "🪲"; biome = "Mistlands"; }
-                    else if (prefabName.StartsWith("CharredFortress") || prefabName.StartsWith("Fader")) { label = "FADER"; icon = "🔥"; biome = "Ashlands"; }
-                    else if (prefabName.StartsWith("Vendor_BlackForest")) { label = "HALDOR"; icon = "💰"; ltype = "trader"; biome = "Black Forest"; }
-                    else if (prefabName.StartsWith("Hildir_camp")) { label = "HILDIR"; icon = "⛺"; ltype = "trader"; biome = "Plains"; }
-                    else if (prefabName.StartsWith("BogWitch_Camp")) { label = "BOG WITCH"; icon = "🧙"; ltype = "trader"; biome = "Swamp"; }
+                IDictionary locDict = null;
+                if (zsInstance != null)
+                {
+                    const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy;
+                    foreach (var fieldName in new[] { "m_locationInstances", "locationInstances", "_locationInstances", "m_locations" })
+                    {
+                        try
+                        {
+                            locDict = zsInstance.GetType().GetField(fieldName, flags)?.GetValue(zsInstance) as IDictionary
+                                   ?? zsInstance.GetType().GetProperty(fieldName, flags)?.GetValue(zsInstance, null) as IDictionary;
+                            if (locDict != null && locDict.Count > 0) break;
+                        }
+                        catch { }
+                    }
+                }
 
-                    if (label == null) continue;
+                if (locDict != null)
+                {
+                    const BindingFlags memberFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+                    foreach (var val in locDict.Values)
+                    {
+                        if (val == null) continue;
+                        var vType = val.GetType();
 
-                    var pType = posObj.GetType();
-                    float x = Convert.ToSingle(pType.GetField("x")?.GetValue(posObj) ?? 0f);
-                    float z = Convert.ToSingle(pType.GetField("z")?.GetValue(posObj) ?? 0f);
+                        object locObj = vType.GetField("m_location", memberFlags)?.GetValue(val)
+                                     ?? vType.GetProperty("m_location", memberFlags)?.GetValue(val, null);
+                        object posObj = vType.GetField("m_position", memberFlags)?.GetValue(val)
+                                     ?? vType.GetProperty("m_position", memberFlags)?.GetValue(val, null)
+                                     ?? vType.GetField("m_pos", memberFlags)?.GetValue(val);
 
-                    if (!first) sb.Append(",\n");
-                    first = false;
-                    sb.Append("    { ");
-                    sb.AppendFormat(CultureInfo.InvariantCulture, "\"id\": \"lm-{0}\", \"type\": \"{1}\", \"name\": \"{2}\", \"icon\": \"{3}\", \"biome\": \"{4}\", \"x\": {5:F0}, \"z\": {6:F0}",
-                        count++, ltype, EscapeJson(label), EscapeJson(icon), EscapeJson(biome), x, z);
-                    sb.Append(" }");
-                    if (count >= 40) break;
+                        if (!TryExtractVector3(posObj, out float x, out float _, out float z)) continue;
+
+                        string prefabName = "";
+                        if (locObj != null)
+                        {
+                            var lType = locObj.GetType();
+                            prefabName = lType.GetField("m_prefabName", memberFlags)?.GetValue(locObj) as string
+                                      ?? lType.GetProperty("m_prefabName", memberFlags)?.GetValue(locObj, null) as string
+                                      ?? lType.GetField("m_name", memberFlags)?.GetValue(locObj) as string
+                                      ?? lType.GetProperty("name", memberFlags)?.GetValue(locObj, null) as string
+                                      ?? "";
+
+                            if (string.IsNullOrEmpty(prefabName))
+                            {
+                                var prefabObj = lType.GetField("m_prefab", memberFlags)?.GetValue(locObj)
+                                             ?? lType.GetProperty("m_prefab", memberFlags)?.GetValue(locObj, null);
+                                if (prefabObj != null)
+                                {
+                                    prefabName = prefabObj.GetType().GetProperty("name", memberFlags)?.GetValue(prefabObj, null) as string ?? "";
+                                }
+                            }
+                        }
+
+                        if (string.IsNullOrEmpty(prefabName))
+                        {
+                            prefabName = vType.GetField("m_prefabName", memberFlags)?.GetValue(val) as string
+                                      ?? vType.GetField("m_name", memberFlags)?.GetValue(val) as string
+                                      ?? "";
+                        }
+                        if (string.IsNullOrEmpty(prefabName)) continue;
+
+                        string p = prefabName.ToLowerInvariant();
+                        string label = null;
+                        string icon = "📍";
+                        string ltype = "boss";
+                        string biome = "Unknown";
+
+                        if (p.Contains("starttemple")) { label = "Sacrificial Stones"; icon = "🏛️"; ltype = "spawn"; biome = "Meadows"; }
+                        else if (p.Contains("eikthyr")) { label = "EIKTHYR"; icon = "🦌"; biome = "Meadows"; }
+                        else if (p.Contains("gdking") || p.Contains("elder")) { label = "THE ELDER"; icon = "🌲"; biome = "Black Forest"; }
+                        else if (p.Contains("bonemass")) { label = "BONEMASS"; icon = "☠️"; biome = "Swamp"; }
+                        else if (p.Contains("dragonqueen") || p.Contains("moder")) { label = "MODER"; icon = "🐉"; biome = "Mountains"; }
+                        else if (p.Contains("goblinking") || p.Contains("yagluth")) { label = "YAGLUTH"; icon = "👑"; biome = "Plains"; }
+                        else if (p.Contains("dvergrbossentrance") || p.Contains("queen")) { label = "THE QUEEN"; icon = "🪲"; biome = "Mistlands"; }
+                        else if (p.Contains("charredfortress") || p.Contains("fader")) { label = "FADER"; icon = "🔥"; biome = "Ashlands"; }
+                        else if (p.Contains("vendor_blackforest") || p.Contains("haldor")) { label = "HALDOR"; icon = "💰"; ltype = "trader"; biome = "Black Forest"; }
+                        else if (p.Contains("hildir")) { label = "HILDIR"; icon = "⛺"; ltype = "trader"; biome = "Plains"; }
+                        else if (p.Contains("bogwitch")) { label = "BOG WITCH"; icon = "🧙"; ltype = "trader"; biome = "Swamp"; }
+
+                        if (label == null) continue;
+
+                        if (!first) sb.Append(",\n");
+                        first = false;
+                        sb.Append("    { ");
+                        sb.AppendFormat(CultureInfo.InvariantCulture, "\"id\": \"lm-{0}\", \"type\": \"{1}\", \"name\": \"{2}\", \"icon\": \"{3}\", \"biome\": \"{4}\", \"x\": {5:F0}, \"z\": {6:F0}",
+                            count++, ltype, EscapeJson(label), EscapeJson(icon), EscapeJson(biome), x, z);
+                        sb.Append(" }");
+                        if (count >= 50) break;
+                    }
                 }
             }
             catch
             {
                 // Ignore if ZoneSystem layout differs
+            }
+
+            if (count == 0)
+            {
+                if (!first) sb.Append(",\n");
+                sb.Append("    { \"id\": \"lm-0\", \"type\": \"spawn\", \"name\": \"Sacrificial Stones\", \"icon\": \"🏛️\", \"biome\": \"Meadows\", \"x\": 0, \"z\": 0 }");
             }
         }
 
@@ -395,22 +480,21 @@ namespace HeimdallWatchtower
         private void ExportWorldAndPlayers()
         {
             ResolveTypes();
-            if (_znetType == null || _zdoManType == null)
+            if (_znetType == null)
             {
                 WriteBootstrapStatus("waiting_for_assembly_valheim");
                 return;
             }
 
-            var znetInstance = _znetType.GetProperty("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null)
-                            ?? _znetType.GetField("m_instance", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
-            var zdoManInstance = _zdoManType.GetProperty("instance", BindingFlags.Public | BindingFlags.Static)?.GetValue(null, null)
-                              ?? _zdoManType.GetField("s_instance", BindingFlags.NonPublic | BindingFlags.Static)?.GetValue(null);
-
-            if (znetInstance == null || zdoManInstance == null)
+            var znetInstance = GetStaticInstance(_znetType);
+            if (znetInstance == null)
             {
                 WriteBootstrapStatus("loading_world_save");
                 return;
             }
+
+            var zdoManInstance = GetStaticInstance(_zdoManType)
+                              ?? _znetType.GetField("m_zdoMan", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInstance);
 
             string worldName = _znetType.GetMethod("GetWorldName")?.Invoke(znetInstance, null) as string ?? "Dedicated";
             var peersObj = _znetType.GetMethod("GetPeers")?.Invoke(znetInstance, null) as IEnumerable;
@@ -445,12 +529,15 @@ namespace HeimdallWatchtower
 
             // Find ZDOMan.GetZDO(ZDOID) without depending on which assembly defines struct ZDOID
             MethodInfo getZdoMethod = null;
-            foreach (var m in _zdoManType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+            if (_zdoManType != null)
             {
-                if (m.Name == "GetZDO" && m.GetParameters().Length == 1)
+                foreach (var m in _zdoManType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 {
-                    getZdoMethod = m;
-                    break;
+                    if (m.Name == "GetZDO" && m.GetParameters().Length == 1)
+                    {
+                        getZdoMethod = m;
+                        break;
+                    }
                 }
             }
 
@@ -460,6 +547,7 @@ namespace HeimdallWatchtower
             sb.Append("  \"pluginVersion\": \"1.5.0\",\n");
             sb.AppendFormat("  \"worldName\": \"{0}\",\n", EscapeJson(worldName));
             sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
+            sb.AppendFormat("  \"timestamp\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
             sb.Append("  \"players\": [\n");
 
             bool first = true;

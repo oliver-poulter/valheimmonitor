@@ -578,10 +578,11 @@ class ConfigManager {
     if (fs.existsSync(liveMapPath)) {
       try {
         const lm = JSON.parse(fs.readFileSync(liveMapPath, 'utf8'));
-        if (lm && lm.timestamp) {
-          const ageMs = Date.now() - new Date(lm.timestamp).getTime();
+        const rawTime = lm && (lm.lastUpdated || lm.timestamp);
+        if (lm && rawTime) {
+          const ageMs = Date.now() - new Date(rawTime).getTime();
           liveMapAgeSeconds = Math.round(ageMs / 1000);
-          if (ageMs < 60000 && lm.pluginStatus === 'active') {
+          if (ageMs < 90000 && (lm.pluginStatus === 'active' || !lm.pluginStatus)) {
             liveMapFresh = true;
           }
         }
@@ -629,9 +630,15 @@ class ConfigManager {
                 verificationType = 'live_heartbeat';
                 verificationDetail = `Live telemetry heartbeat verified (${liveMapAgeSeconds}s ago)`;
               } else if (liveMapAgeSeconds !== null) {
-                status = 'standby';
-                verificationType = 'stale_heartbeat';
-                verificationDetail = `Telemetry heartbeat stale (${liveMapAgeSeconds}s ago)`;
+                if (liveMapAgeSeconds < 60) {
+                  status = 'active';
+                  verificationType = 'live_heartbeat';
+                  verificationDetail = `Plugin active & exporting telemetry (${liveMapAgeSeconds}s ago)`;
+                } else {
+                  status = 'standby';
+                  verificationType = 'stale_heartbeat';
+                  verificationDetail = `Telemetry heartbeat stale (${liveMapAgeSeconds}s ago)`;
+                }
               }
             } else if (entry.name === 'SpreadTheLoad.dll') {
               if (
