@@ -67,8 +67,9 @@ class ConfigManager {
     this.watchtowerDir = path.join(this.configDir, 'watchtower');
     this.backupsDir = process.env.BACKUPS_DIRECTORY || path.join(this.configDir, 'backups');
     this.worldsDir = path.join(this.configDir, 'worlds_local');
-    this.bepinexConfigDir = path.join(this.configDir, 'bepinex', 'config');
-    this.bepinexPluginsDir = path.join(this.configDir, 'bepinex', 'plugins');
+    this.bepinexDir = path.join(this.configDir, 'bepinex');
+    this.bepinexConfigDir = path.join(this.bepinexDir, 'config');
+    this.bepinexPluginsDir = path.join(this.bepinexDir, 'plugins');
     this.statsFile = path.join(this.watchtowerDir, 'stats.json');
 
     this.ensureDirectories();
@@ -538,12 +539,58 @@ class ConfigManager {
   }
 
   /**
-   * Lists BepInEx plugins and editable .cfg files
+   * Lists BepInEx plugins and editable .cfg files with real runtime verification
    */
-  getModConfigs() {
+  getModConfigs(runtime = {}) {
     const plugins = [];
     const bundledMap = new Map(BUNDLED_PERFORMANCE_PLUGINS.map((p) => [p.filename, p]));
     const foundFilenames = new Set();
+
+    // 1. Check BepInEx LogOutput.log for confirmed plugin load entries
+    let logOutputContent = '';
+    const logOutputPath = path.join(this.bepinexDir, 'LogOutput.log');
+    if (fs.existsSync(logOutputPath)) {
+      try {
+        const stat = fs.statSync(logOutputPath);
+        const readBytes = Math.min(stat.size, 256 * 1024);
+        const buffer = Buffer.alloc(readBytes);
+        const fd = fs.openSync(logOutputPath, 'r');
+        fs.readSync(fd, buffer, 0, readBytes, Math.max(0, stat.size - readBytes));
+        fs.closeSync(fd);
+        logOutputContent = buffer.toString('utf8').toLowerCase();
+      } catch (_) {}
+    }
+
+    // 2. Check active generated .cfg files in /config/bepinex/config/
+    const existingConfigs = new Set();
+    if (fs.existsSync(this.bepinexConfigDir)) {
+      try {
+        for (const cfg of fs.readdirSync(this.bepinexConfigDir)) {
+          existingConfigs.add(cfg.toLowerCase());
+        }
+      } catch (_) {}
+    }
+
+    // 3. Check live telemetry heartbeat for WatchtowerMapExporter
+    let liveMapFresh = false;
+    let liveMapAgeSeconds = null;
+    const liveMapPath = path.join(this.watchtowerDir, 'live_map.json');
+    if (fs.existsSync(liveMapPath)) {
+      try {
+        const lm = JSON.parse(fs.readFileSync(liveMapPath, 'utf8'));
+        if (lm && lm.timestamp) {
+          const ageMs = Date.now() - new Date(lm.timestamp).getTime();
+          liveMapAgeSeconds = Math.round(ageMs / 1000);
+          if (ageMs < 60000 && lm.pluginStatus === 'active') {
+            liveMapFresh = true;
+          }
+        }
+      } catch (_) {}
+    }
+
+    const isContainerRunning = runtime.containerStatus ? runtime.containerStatus.state === 'running' : true;
+    const isBepInExEnabled = runtime.containerStatus?.envConfig?.BEPINEX !== 'false' && process.env.BEPINEX !== 'false';
+    const loadedFromLogs = runtime.loadedPluginsFromLogs || new Set();
 
     if (fs.existsSync(this.bepinexPluginsDir)) {
       for (const entry of fs.readdirSync(this.bepinexPluginsDir, { withFileTypes: true })) {
@@ -559,12 +606,84 @@ class ConfigManager {
             author: 'Custom',
             description: 'User-installed BepInEx plugin in /config/bepinex/plugins'
           };
+
+          let status = 'standby';
+          let verificationType = 'file_only';
+          let verificationDetail = 'DLL present on disk; awaiting BepInEx runtime initialization';
+
+          if (!isBepInExEnabled) {
+            status = 'disabled';
+            verificationType = 'framework_disabled';
+            verificationDetail = 'BEPINEX=false in container environment';
+          } else if (!isContainerRunning) {
+            status = 'standby';
+            verificationType = 'server_offline';
+            verificationDetail = 'Valheim container stopped/restarting';
+          } else {
+            // Check real runtime proof per mod
+            if (entry.name === 'WatchtowerMapExporter.dll') {
+              if (liveMapFresh) {
+                status = 'active';
+                verificationType = 'live_heartbeat';
+                verificationDetail = `Live telemetry heartbeat verified (${liveMapAgeSeconds}s ago)`;
+              } else if (liveMapAgeSeconds !== null) {
+                status = 'standby';
+                verificationType = 'stale_heartbeat';
+                verificationDetail = `Telemetry heartbeat stale (${liveMapAgeSeconds}s ago)`;
+              }
+            } else if (entry.name === 'SpreadTheLoad.dll') {
+              if (
+                logOutputContent.includes('spreadtheload') ||
+                loadedFromLogs.has('spreadtheload') ||
+                existingConfigs.has('spreadtheload.cfg') ||
+                existingConfigs.has('org.bepinex.plugins.spreadtheload.cfg')
+              ) {
+                status = 'active';
+                verificationType = 'runtime_confirmed';
+                verificationDetail = 'Verified loaded via BepInEx runtime log / config binding';
+              }
+            } else if (entry.name === 'DIT.BetterNetworking10.dll') {
+              if (
+                logOutputContent.includes('betternetworking') ||
+                loadedFromLogs.has('betternetworking') ||
+                existingConfigs.has('cw_jesse.betternetworking.cfg') ||
+                existingConfigs.has('org.bepinex.plugins.betternetworking.cfg')
+              ) {
+                status = 'active';
+                verificationType = 'runtime_confirmed';
+                verificationDetail = 'Verified loaded via BepInEx runtime log / config binding';
+              }
+            } else if (entry.name === 'ServerDevcommands.dll') {
+              if (
+                logOutputContent.includes('server devcommands') ||
+                logOutputContent.includes('serverdevcommands') ||
+                loadedFromLogs.has('server devcommands') ||
+                loadedFromLogs.has('serverdevcommands') ||
+                existingConfigs.has('server_devcommands.cfg')
+              ) {
+                status = 'active';
+                verificationType = 'runtime_confirmed';
+                verificationDetail = 'Verified loaded via BepInEx runtime log / config binding';
+              }
+            } else {
+              // Custom user plugin
+              const base = entry.name.replace(/\.dll$/i, '').toLowerCase();
+              if (logOutputContent.includes(base) || loadedFromLogs.has(base)) {
+                status = 'active';
+                verificationType = 'runtime_confirmed';
+                verificationDetail = 'Verified loaded via BepInEx runtime log';
+              }
+            }
+          }
+
           plugins.push({
             ...meta,
             filename: entry.name,
             sizeBytes: stat.size,
             updatedAt: stat.mtime.toISOString(),
-            status: 'active'
+            status,
+            verificationType,
+            verificationDetail
           });
         }
       }
@@ -577,7 +696,9 @@ class ConfigManager {
           ...bp,
           sizeBytes: 0,
           updatedAt: new Date().toISOString(),
-          status: 'pending_install'
+          status: 'pending_install',
+          verificationType: 'missing_file',
+          verificationDetail: 'Plugin not yet synchronized to /config/bepinex/plugins/'
         });
       }
     }

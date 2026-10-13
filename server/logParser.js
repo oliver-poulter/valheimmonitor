@@ -8,6 +8,7 @@ class ValheimLogParser {
     this.pendingSteamIds = [];
     this.recentLogs = [];
     this.maxLogLines = 400;
+    this.loadedBepInExPlugins = new Set();
   }
 
   get state() {
@@ -228,6 +229,16 @@ class ValheimLogParser {
     ) {
       if (this.finalizeAllSessions(timestamp)) {
         stateChanged = true;
+      }
+      this.loadedBepInExPlugins.clear();
+    }
+
+    // Pattern F: BepInEx plugin chainloader tracking from stdout
+    const bepinexPluginMatch = body.match(/\[(?:Info|Message)\s*:\s*BepInEx\]\s*(?:Loading\s*\[(.+?)(?:\s+[\d\.]+)?\]|Loaded\s*\[(.+?)\])/i);
+    if (bepinexPluginMatch) {
+      const pName = (bepinexPluginMatch[1] || bepinexPluginMatch[2] || '').trim();
+      if (pName) {
+        this.loadedBepInExPlugins.add(pName.toLowerCase());
       }
     }
 

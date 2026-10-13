@@ -43,7 +43,10 @@ function buildOverviewPayload() {
   });
   const { backups, worlds } = configManager.getBackupsAndWorlds();
   const accessLists = configManager.getAccessLists();
-  const mods = configManager.getModConfigs();
+  const mods = configManager.getModConfigs({
+    containerStatus: dockerController.currentStatus,
+    loadedPluginsFromLogs: logParser.loadedBepInExPlugins
+  });
 
   return {
     container: dockerController.currentStatus,
@@ -223,7 +226,13 @@ app.post('/api/mods/config/:filename', (req, res) => {
 
 // Active Mods & BepInEx Catalog
 app.get('/api/mods', (req, res) => {
-  res.json({ ok: true, mods: configManager.getModConfigs() });
+  res.json({
+    ok: true,
+    mods: configManager.getModConfigs({
+      containerStatus: dockerController.currentStatus,
+      loadedPluginsFromLogs: logParser.loadedBepInExPlugins
+    })
+  });
 });
 
 // Settings, World Modifiers & Discord Webhook Configuration

@@ -1284,17 +1284,21 @@ function renderActiveModsList() {
   const activeCount = plugins.filter((p) => p.status === 'active').length;
 
   if (countBadge) {
-    countBadge.textContent = `${activeCount} of ${plugins.length} Mods Active • Zero Client Required`;
+    countBadge.textContent = `${activeCount} of ${plugins.length} Verified Active • Zero Client Required`;
   }
   if (settingsCountBadge) {
-    settingsCountBadge.textContent = `${activeCount} / ${plugins.length} Active in BepInEx`;
+    settingsCountBadge.textContent = `${activeCount} / ${plugins.length} Verified in BepInEx`;
   }
 
+  // 1. Overview Grid of Mod Cards
   if (container) {
     if (plugins.length === 0) {
       container.innerHTML = `
         <div style="grid-column: 1 / -1; padding: 1.5rem; text-align: center; color: var(--text-secondary); background: rgba(15,23,42,0.4); border-radius: 8px;">
           <p>No mods detected in <code>/config/bepinex/plugins/</code>.</p>
+          <button class="btn btn-sm btn-amber" onclick="triggerAutoConfigureServer()" style="margin-top:0.75rem">
+            ⚡ Install Performance Suite &amp; Telemetry
+          </button>
         </div>
       `;
     } else {
@@ -1306,31 +1310,114 @@ function renderActiveModsList() {
           else if (p.filename.includes('ServerDevcommands')) icon = '🛠️';
           else if (p.filename.includes('WatchtowerMapExporter')) icon = '🗺️';
 
-          const isActive = p.status === 'active';
-          const statusBadge = isActive
-            ? '<span class="role-badge role-permitted">Active in BepInEx</span>'
-            : '<span class="role-badge">Pending Sync</span>';
+          let statusBadge = '<span class="mod-status-badge mod-status-standby">📁 Standby (Awaiting Boot)</span>';
+          if (p.status === 'active') {
+            statusBadge = '<span class="mod-status-badge mod-status-active">⚡ Verified in Memory</span>';
+          } else if (p.status === 'disabled') {
+            statusBadge = '<span class="mod-status-badge mod-status-disabled">⚠️ Framework Disabled</span>';
+          } else if (p.status === 'pending_install') {
+            statusBadge = '<span class="mod-status-badge mod-status-pending">⏳ Pending Sync</span>';
+          }
 
           const sizeStr = p.sizeBytes ? formatBytes(p.sizeBytes) : 'Bundled';
           const authorStr = p.author ? `by ${escapeHtml(p.author)}` : '';
 
           return `
-            <div class="cmd-card">
-              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:0.5rem">
-                <div>
-                  <div class="cmd-card-title">${icon} ${escapeHtml(p.title || p.filename)}</div>
-                  <div class="cmd-card-desc">${escapeHtml(p.type || 'BepInEx Plugin')}</div>
+            <div class="mod-card">
+              <div class="mod-card-top">
+                <div class="mod-card-title-group">
+                  <div class="mod-card-title">
+                    <span>${icon}</span>
+                    <span>${escapeHtml(p.title || p.filename)}</span>
+                    <span class="mod-card-version">v${escapeHtml(p.version || '1.0')}</span>
+                  </div>
+                  <div class="mod-card-type">${escapeHtml(p.type || 'BepInEx Plugin')}</div>
                 </div>
                 ${statusBadge}
               </div>
-              <p class="cmd-card-desc" style="margin-top:0.35rem">${escapeHtml(p.description || '')}</p>
-              <div class="viking-meta-line" style="margin-top:0.4rem">
-                <code>${escapeHtml(p.filename)}</code> • ${sizeStr} ${authorStr ? `• ${authorStr}` : ''}
+              <p class="mod-card-desc">${escapeHtml(p.description || '')}</p>
+              <div class="mod-verify-note">
+                <span>🔍</span>
+                <span>${escapeHtml(p.verificationDetail || 'Verified via file on disk')}</span>
+              </div>
+              <div class="mod-card-footer">
+                <div class="mod-card-meta">
+                  <code>${escapeHtml(p.filename)}</code>
+                  <span>•</span>
+                  <span>${sizeStr}</span>
+                  ${authorStr ? `<span>•</span><span>${authorStr}</span>` : ''}
+                </div>
+                <span class="mod-pill-server">Zero Client Mod</span>
               </div>
             </div>
           `;
         })
         .join('');
+    }
+  }
+
+  // 2. Settings Table
+  if (tableContainer) {
+    if (plugins.length === 0) {
+      tableContainer.innerHTML = `
+        <div style="padding: 1.25rem; text-align: center; color: var(--text-secondary);">
+          No BepInEx plugins configured yet.
+        </div>
+      `;
+    } else {
+      tableContainer.innerHTML = `
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Plugin / Mod</th>
+              <th>Category</th>
+              <th>Runtime Verification Proof</th>
+              <th>Filename</th>
+              <th>Size</th>
+              <th>Client Requirement</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${plugins
+              .map((p) => {
+                let icon = '🧩';
+                if (p.filename.includes('SpreadTheLoad')) icon = '👑';
+                else if (p.filename.includes('BetterNetworking')) icon = '⚡';
+                else if (p.filename.includes('ServerDevcommands')) icon = '🛠️';
+                else if (p.filename.includes('WatchtowerMapExporter')) icon = '🗺️';
+
+                let statusBadge = '<span class="mod-status-badge mod-status-standby">📁 Standby</span>';
+                if (p.status === 'active') {
+                  statusBadge = '<span class="mod-status-badge mod-status-active">⚡ Verified Active</span>';
+                } else if (p.status === 'disabled') {
+                  statusBadge = '<span class="mod-status-badge mod-status-disabled">⚠️ Disabled</span>';
+                } else if (p.status === 'pending_install') {
+                  statusBadge = '<span class="mod-status-badge mod-status-pending">⏳ Pending Sync</span>';
+                }
+
+                return `
+                  <tr>
+                    <td>
+                      <div style="display:flex;align-items:center;gap:0.45rem;font-weight:600">
+                        <span>${icon}</span>
+                        <span>${escapeHtml(p.title || p.filename)}</span>
+                        <span class="mod-card-version" style="font-size:0.68rem">v${escapeHtml(p.version || '1.0')}</span>
+                      </div>
+                    </td>
+                    <td style="color:#f59e0b;font-size:0.78rem;font-weight:600">${escapeHtml(p.type || 'BepInEx Plugin')}</td>
+                    <td style="font-size:0.75rem;color:#38bdf8;font-family:var(--font-mono)">${escapeHtml(p.verificationDetail || '-')}</td>
+                    <td><code>${escapeHtml(p.filename)}</code></td>
+                    <td style="font-family:var(--font-mono);font-size:0.78rem">${p.sizeBytes ? formatBytes(p.sizeBytes) : '-'}</td>
+                    <td><span class="mod-pill-server">None (Server-Side)</span></td>
+                    <td>${statusBadge}</td>
+                  </tr>
+                `;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      `;
     }
   }
 }
