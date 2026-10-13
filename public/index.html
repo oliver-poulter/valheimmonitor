@@ -263,6 +263,23 @@
           </div>
         </div>
       </div>
+
+      <!-- Server Active Mods & Performance Suite -->
+      <div class="panel" style="margin-top: 1.5rem;" id="overviewModsPanel">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">⚡ Active Server Mods &amp; Performance Suite</h2>
+            <p class="panel-subtitle">Integrated BepInEx mods eliminating combat desync, buffer limits &amp; simulation lag (Zero client install required)</p>
+          </div>
+          <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
+            <span class="mono-badge" id="overviewModsCountBadge">4 Mods Active</span>
+            <button class="btn btn-xs btn-amber" onclick="triggerAutoConfigureServer()" title="Sync and verify all performance mods inside valheim-server">
+              ⚡ Sync / Deploy Mods
+            </button>
+          </div>
+        </div>
+        <div class="mods-catalog-grid" id="overviewModsContainer"></div>
+      </div>
     </section>
 
     <!-- ==================== TAB 2: VIKING ROSTER & STATS ==================== -->
@@ -696,6 +713,18 @@
               placeholder="Select a .cfg file to edit..."
             ></textarea>
           </div>
+
+          <!-- Installed Performance Plugins & DLLs -->
+          <div class="panel" style="margin-top: 1.25rem;">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">🛡️ Installed Performance Plugins &amp; DLLs</h2>
+                <p class="panel-subtitle">BepInEx plugins active in <code>/config/bepinex/plugins/</code></p>
+              </div>
+              <span class="mono-badge" id="settingsModsCountBadge">4 Loaded</span>
+            </div>
+            <div id="settingsModsTableContainer" class="table-container"></div>
+          </div>
         </div>
       </div>
     </section>
@@ -780,17 +809,18 @@
             <div class="bepinex-bridge-banner">
               <div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;flex-wrap:wrap">
                 <div class="viking-name-line">
-                  <span>⚡ Automatic Server Telemetry Configuration</span>
+                  <span>⚡ Automatic Performance Suite &amp; Telemetry Configuration</span>
                   <span class="role-badge role-permitted" id="bepinexStatusBadge">Ready</span>
                 </div>
                 <button class="btn btn-xs btn-amber" id="btnAutoConfigureServer" onclick="triggerAutoConfigureServer()">
-                  ⚡ Auto-Configure Server Now
+                  ⚡ Auto-Configure Performance Suite Now
                 </button>
               </div>
               <p style="font-size:0.76rem;color:var(--text-secondary);margin-top:0.35rem">
-                Watchtower automatically creates a safety backup, installs <code>WatchtowerMapExporter.dll</code> into
-                <code>/config/bepinex/plugins/</code>, and exports live player <code>(X, Y, Z)</code>
-                coordinates &amp; <code>health</code> floats every 2s. Vanilla players can still join without installing any client mods!
+                Watchtower automatically creates a safety backup, provisions the <strong>Performance Suite</strong>
+                (<code>SpreadTheLoad.dll</code>, <code>DIT.BetterNetworking10.dll</code>, <code>ServerDevcommands.dll</code>, and <code>WatchtowerMapExporter.dll</code>)
+                into <code>/config/bepinex/plugins/</code>, and synchronizes live player <code>(X, Y, Z)</code>
+                coordinates &amp; <code>health</code> floats every 2s. Vanilla players can join freely without installing any client mods!
               </p>
               <div style="font-size:0.75rem;background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.3);border-radius:6px;padding:0.45rem 0.65rem;margin-top:0.4rem;color:#fde68a">
                 <strong>📌 Required Compose Setting:</strong> Add <code>- BEPINEX=true</code> under <code>environment:</code> for <code>valheim</code> in your <code>docker-compose.yml</code> so BepInEx runs on server startup!

@@ -22,6 +22,45 @@ const RAID_LORE_MAP = {
   army_charred: { name: 'The Undead Army Marches!', biome: 'Ashlands', icon: '🌋', severity: 'Nightmare' }
 };
 
+const BUNDLED_PERFORMANCE_PLUGINS = [
+  {
+    filename: 'SpreadTheLoad.dll',
+    title: 'SpreadTheLoad',
+    version: '0.2.2',
+    type: 'Simulation Load Balancer',
+    badge: '👑 Server-Side Only',
+    author: 'DeathMonger',
+    description: 'Dynamically rebalances creature & zone simulation ownership off struggling clients to eliminate combat desync for the entire party.'
+  },
+  {
+    filename: 'DIT.BetterNetworking10.dll',
+    title: 'BetterNetworking Valheim',
+    version: '1.2.0',
+    type: 'Network & Queue Overhaul',
+    badge: '⚡ Network Overhaul',
+    author: 'SimplifyDave / CW_Jesse',
+    description: 'Expands data rate buffers & compresses ZDO network packets to prevent combat rubberbanding and parry lag with 8-10 players.'
+  },
+  {
+    filename: 'ServerDevcommands.dll',
+    title: 'Server Devcommands',
+    version: '1.115.0',
+    type: 'Server Console Authority & Maintenance',
+    badge: '🛠️ Server Admin & Tools',
+    author: 'JereKuusela',
+    description: 'Enables server console commands, world maintenance, optterrain, and entity clean-up on dedicated servers.'
+  },
+  {
+    filename: 'WatchtowerMapExporter.dll',
+    title: 'Heimdall Watchtower Map & Health Exporter',
+    version: '1.5.0',
+    type: 'Web Telemetry & Live Map',
+    badge: '🗺️ Map & Health Radar',
+    author: 'Heimdall',
+    description: 'Exports live Viking coordinates (X, Y, Z), health, stamina, food buffs & terrain grid to the dashboard.'
+  }
+];
+
 class ConfigManager {
   constructor(configDir = DEFAULT_CONFIG_DIR) {
     this.configDir = configDir;
@@ -503,14 +542,43 @@ class ConfigManager {
    */
   getModConfigs() {
     const plugins = [];
+    const bundledMap = new Map(BUNDLED_PERFORMANCE_PLUGINS.map((p) => [p.filename, p]));
+    const foundFilenames = new Set();
+
     if (fs.existsSync(this.bepinexPluginsDir)) {
       for (const entry of fs.readdirSync(this.bepinexPluginsDir, { withFileTypes: true })) {
         if (entry.isFile() && entry.name.endsWith('.dll')) {
+          foundFilenames.add(entry.name);
           const stat = fs.statSync(path.join(this.bepinexPluginsDir, entry.name));
-          plugins.push({ name: entry.name, sizeBytes: stat.size, updatedAt: stat.mtime.toISOString() });
-        } else if (entry.isDirectory()) {
-          plugins.push({ name: `${entry.name}/`, sizeBytes: 0, updatedAt: new Date().toISOString() });
+          const meta = bundledMap.get(entry.name) || {
+            filename: entry.name,
+            title: entry.name.replace(/\.dll$/i, ''),
+            version: 'Custom',
+            type: 'Custom BepInEx Plugin',
+            badge: '🧩 User Plugin',
+            author: 'Custom',
+            description: 'User-installed BepInEx plugin in /config/bepinex/plugins'
+          };
+          plugins.push({
+            ...meta,
+            filename: entry.name,
+            sizeBytes: stat.size,
+            updatedAt: stat.mtime.toISOString(),
+            status: 'active'
+          });
         }
+      }
+    }
+
+    // In preview mode or if bundled plugins are not yet copied to targetDir, surface catalog status
+    for (const bp of BUNDLED_PERFORMANCE_PLUGINS) {
+      if (!foundFilenames.has(bp.filename)) {
+        plugins.push({
+          ...bp,
+          sizeBytes: 0,
+          updatedAt: new Date().toISOString(),
+          status: 'pending_install'
+        });
       }
     }
 
@@ -563,5 +631,6 @@ class ConfigManager {
 
 module.exports = {
   ConfigManager,
-  RAID_LORE_MAP
+  RAID_LORE_MAP,
+  BUNDLED_PERFORMANCE_PLUGINS
 };

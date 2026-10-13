@@ -2,7 +2,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { fetchStatusJson, queryA2SInfo, executeRconCommand } = require('./rconClient');
-const { RAID_LORE_MAP } = require('./configManager');
+const { RAID_LORE_MAP, BUNDLED_PERFORMANCE_PLUGINS } = require('./configManager');
 const { sendDiscordNotification } = require('./discordNotifier');
 
 const DOCKER_SOCKET = process.env.DOCKER_SOCKET || '/var/run/docker.sock';
@@ -57,7 +57,7 @@ class DockerController {
   }
 
   async init() {
-    this.deployBundledBepInExPlugin();
+    const newlyDeployedMods = this.deployBundledBepInExPlugin();
     const hasSocket = fs.existsSync(DOCKER_SOCKET);
     if (hasSocket) {
       const found = await this.findValheimContainer();
@@ -67,20 +67,37 @@ class DockerController {
         await this.refreshContainerStatus();
         this.attachContainerLogs();
 
-        // Automatically install or upgrade WatchtowerMapExporter.dll to v1.5.0 inside valheim-server if not yet on v1.5.0
+        // Automatically install or upgrade BepInEx & performance plugins inside valheim-server
         if (process.env.AUTO_CONFIGURE_SERVER !== 'false') {
-          setTimeout(() => {
+          setTimeout(async () => {
             try {
               const liveMapPath = path.join(this.configManager.watchtowerDir, 'live_map.json');
-              let alreadyLatest = false;
+              let alreadyConfigured = false;
               if (fs.existsSync(liveMapPath)) {
                 const parsed = JSON.parse(fs.readFileSync(liveMapPath, 'utf8'));
                 if (parsed && parsed.pluginVersion === '1.5.0' && parsed.pluginStatus === 'active') {
-                  alreadyLatest = true;
+                  alreadyConfigured = true;
                 }
               }
-              if (!alreadyLatest) {
-                this.autoConfigureValheimServer({ forceRestart: true }).catch(() => {});
+
+              // Also check inside valheim-server container if SpreadTheLoad.dll is present
+              let containerMissingMods = false;
+              try {
+                const checkRes = await this.execContainer('test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && echo "PRESENT"');
+                if (!checkRes || !checkRes.includes('PRESENT')) {
+                  containerMissingMods = true;
+                }
+              } catch (_) {
+                containerMissingMods = true;
+              }
+
+              // SEAMLESS AUTO-MIGRATION:
+              // If an existing deployment is missing ANY performance mod, trigger autoConfigureValheimServer automatically!
+              if (!alreadyConfigured || newlyDeployedMods || containerMissingMods) {
+                console.log(`[Performance Suite Migration] Deploying mods (${BUNDLED_PERFORMANCE_PLUGINS.map(m => m.title).join(', ')})...`);
+                this.autoConfigureValheimServer({ forceRestart: true }).catch((err) => {
+                  console.error('[Performance Suite Migration] Auto-configure error:', err.message);
+                });
               }
             } catch (_) {}
           }, 8000);
@@ -99,21 +116,38 @@ class DockerController {
   }
 
   /**
-   * Copies the pre-compiled WatchtowerMapExporter.dll into /config/bepinex/plugins/
+   * Copies all bundled performance plugins (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter)
+   * into /config/bepinex/plugins/ with 0o777 permissions.
    * (Never touches /config/worlds_local)
    */
   deployBundledBepInExPlugin() {
     try {
-      const bundledDll = path.join(__dirname, '..', 'bepinex-plugin', 'WatchtowerMapExporter.dll');
+      const pluginDir = path.join(__dirname, '..', 'bepinex-plugin');
       const targetDir = this.configManager.bepinexPluginsDir;
       fs.mkdirSync(targetDir, { recursive: true });
       this.configManager.applyOwnership(targetDir);
-      if (fs.existsSync(bundledDll)) {
-        const destDll = path.join(targetDir, 'WatchtowerMapExporter.dll');
-        fs.copyFileSync(bundledDll, destDll);
-        this.configManager.applyOwnership(destDll);
-        return true;
+
+      let deployedCount = 0;
+      for (const p of BUNDLED_PERFORMANCE_PLUGINS) {
+        const srcPath = path.join(pluginDir, p.filename);
+        const destPath = path.join(targetDir, p.filename);
+        if (fs.existsSync(srcPath)) {
+          let shouldCopy = !fs.existsSync(destPath);
+          if (!shouldCopy) {
+            try {
+              const srcStat = fs.statSync(srcPath);
+              const destStat = fs.statSync(destPath);
+              if (srcStat.size !== destStat.size) shouldCopy = true;
+            } catch (_) {}
+          }
+          if (shouldCopy) {
+            fs.copyFileSync(srcPath, destPath);
+            this.configManager.applyOwnership(destPath);
+            deployedCount++;
+          }
+        }
       }
+      return deployedCount > 0;
     } catch (_) {}
     return false;
   }
@@ -121,10 +155,10 @@ class DockerController {
   /**
    * Automatically configures the running lloesche/valheim-server container:
    * 0. Creates a mandatory world backup via valheim-backup before making any change
-   * 1. Installs WatchtowerMapExporter.dll into /config/bepinex/plugins/
+   * 1. Installs performance suite into /config/bepinex/plugins/ (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter)
    * 2. Enables BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults inside valheim-server
    * 3. Runs /usr/local/bin/bepinex-updater inside valheim-server if BepInEx isn't installed yet
-   * 4. Copies the plugin into /opt/valheim/bepinex/BepInEx/plugins/ and gracefully restarts valheim-server
+   * 4. Copies all plugins into /opt/valheim/bepinex/BepInEx/plugins/ and gracefully restarts valheim-server
    */
   async autoConfigureValheimServer({ forceRestart = true } = {}) {
     this.deployBundledBepInExPlugin();
@@ -134,8 +168,8 @@ class DockerController {
       this.currentStatus.autoConfigState = 'configured';
       return {
         ok: true,
-        output: '[Preview Mode] Deployed WatchtowerMapExporter.dll v1.5.0 to /config/bepinex/plugins/',
-        message: 'Deployed WatchtowerMapExporter.dll v1.5.0 to /config/bepinex/plugins/ (Preview Mode).'
+        output: '[Preview Mode] Deployed Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter) to /config/bepinex/plugins/',
+        message: 'Deployed Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter) to /config/bepinex/plugins/ (Preview Mode).'
       };
     }
 
@@ -180,9 +214,9 @@ class DockerController {
       fi
 
       mkdir -p /opt/valheim/bepinex/BepInEx/plugins
-      if [ -f /config/bepinex/plugins/WatchtowerMapExporter.dll ]; then
-        cp -f /config/bepinex/plugins/WatchtowerMapExporter.dll /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll || true
-        echo "Installed WatchtowerMapExporter.dll v1.5.0 into /opt/valheim/bepinex/BepInEx/plugins/"
+      if [ -d /config/bepinex/plugins ]; then
+        cp -f /config/bepinex/plugins/*.dll /opt/valheim/bepinex/BepInEx/plugins/ 2>/dev/null || true
+        echo "Installed & synchronized performance suite into /opt/valheim/bepinex/BepInEx/plugins/"
       fi
 
       # Ensure non-root Valheim server user (PUID/PGID) owns BepInEx and can write to /config/watchtower
@@ -192,11 +226,11 @@ class DockerController {
       chmod -R 777 /config/watchtower 2>/dev/null || true
 
       if [ "${forceRestart ? '1' : '0'}" = "1" ] || [ "$NEEDS_RESTART" = "1" ]; then
-        echo "[5/5] Gracefully restarting valheim-server with BepInEx v1.5.0 enabled..."
+        echo "[5/5] Gracefully restarting valheim-server with Performance Suite enabled..."
         supervisorctl restart valheim-server || true
         echo "RESTARTED_WITH_BEPINEX"
       else
-        echo "[5/5] BepInEx and WatchtowerMapExporter.dll v1.5.0 already active."
+        echo "[5/5] BepInEx and Performance Suite already active."
         echo "ALREADY_CONFIGURED"
       fi
     `;
@@ -231,18 +265,18 @@ class DockerController {
     this.logParser.addEvent({
       type: 'system',
       timestamp,
-      title: 'Auto-Configured Valheim Server (Safety Backup Created)',
+      title: 'Performance Suite & BepInEx Configured (Safety Backup Created)',
       detail: out.includes('RESTARTED_WITH_BEPINEX')
-        ? 'Created safety backup -> Installed BepInEx + WatchtowerMapExporter.dll -> Gracefully restarted'
-        : 'Verified BepInEx + WatchtowerMapExporter.dll active'
+        ? 'Created safety backup -> Installed SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter -> Gracefully restarted'
+        : 'Verified Performance Suite & BepInEx active'
     });
 
     return {
       ok: true,
       output: out,
       message: out.includes('RESTARTED_WITH_BEPINEX')
-        ? 'Safety backup created, BepInEx & WatchtowerMapExporter.dll installed, and server restarted! (Valheim takes ~45-60s to load the world).'
-        : 'Server is configured with BepInEx & WatchtowerMapExporter.dll!'
+        ? 'Safety backup created, Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter) installed, and server restarted! (Valheim takes ~45-60s to load the world).'
+        : 'Server is configured with Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter)!'
     };
   }
 

@@ -221,6 +221,11 @@ app.post('/api/mods/config/:filename', (req, res) => {
   }
 });
 
+// Active Mods & BepInEx Catalog
+app.get('/api/mods', (req, res) => {
+  res.json({ ok: true, mods: configManager.getModConfigs() });
+});
+
 // Settings, World Modifiers & Discord Webhook Configuration
 app.post('/api/settings', (req, res) => {
   try {

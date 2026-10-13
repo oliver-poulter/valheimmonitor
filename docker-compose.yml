@@ -20,11 +20,17 @@ services:
       - WORLD_NAME=${WORLD_NAME:-Midgard}
       - SERVER_PASS=${SERVER_PASS:-secretpass}
       - SERVER_PUBLIC=${SERVER_PUBLIC:-true}
-      - CROSSPLAY=${CROSSPLAY:-true}
+      # Performance Optimization: Disable PlayFab Crossplay relay to use direct Steam Socket UDP networking
+      # (Set to true only if Xbox / Microsoft Store crossplay players need to connect)
+      - CROSSPLAY=${CROSSPLAY:-false}
+      # Enable BepInEx modding framework for SpreadTheLoad, BetterNetworking & Watchtower telemetry
+      - BEPINEX=true
+      # Automated World Backups via valheim-backup
       - BACKUPS=true
       - BACKUPS_CRON=5 * * * *
       - BACKUPS_MAX_AGE=7
       - UPDATE_CRON=*/15 * * * *
+      # Scheduled Daily Restart at 05:10 AM to garbage-collect Unity memory leaks & flush ZDO caches
       - RESTART_CRON=10 5 * * *
       - STATUS_HTTP=true
       - STATUS_HTTP_PORT=80
@@ -57,6 +63,7 @@ services:
       - VALHEIM_CONFIG_DIR=/config
       - SERVER_NAME=${SERVER_NAME:-Valhalla Dedicated}
       - WORLD_NAME=${WORLD_NAME:-Midgard}
+      - AUTO_CONFIGURE_SERVER=true
       - RCON_PORT=2458
       - RCON_PASS=${RCON_PASS:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
