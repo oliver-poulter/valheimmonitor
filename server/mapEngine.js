@@ -293,6 +293,9 @@ class ValheimMapEngine {
     }
     if (Array.isArray(payload.players)) {
       const nextLive = {};
+      const activeIds = new Set(payload.players.map((p) => String(p.steamId || '').trim()).filter(Boolean));
+      const activeNames = new Set(payload.players.map((p) => String(p.name || '').toLowerCase().trim()).filter(Boolean));
+
       for (const p of payload.players) {
         const key = p.steamId || p.name;
         const prev = this.mapState.livePlayers[key];
@@ -331,6 +334,26 @@ class ValheimMapEngine {
         this.recordExplorationPoint(px, pz, p.name || 'Viking');
       }
       this.mapState.livePlayers = nextLive;
+
+      // Reconcile with configManager.state.players:
+      // If BepInEx telemetry is reporting, any player marked online in state.players who is NOT in payload.players is offline
+      let reconciled = false;
+      const nowStr = new Date().toISOString();
+      for (const [key, playerRecord] of Object.entries(this.configManager.state.players)) {
+        if (playerRecord && playerRecord.online) {
+          const isPresent =
+            activeIds.has(playerRecord.steamId) ||
+            activeIds.has(key) ||
+            activeNames.has(String(playerRecord.name || '').toLowerCase());
+          if (!isPresent) {
+            this.configManager.finalizePlayerSession(playerRecord, nowStr);
+            reconciled = true;
+          }
+        }
+      }
+      if (reconciled) {
+        this.configManager.saveState();
+      }
     }
     if (Array.isArray(payload.portals)) this.mapState.portals = payload.portals;
     if (Array.isArray(payload.tombstones)) this.mapState.tombstones = payload.tombstones;

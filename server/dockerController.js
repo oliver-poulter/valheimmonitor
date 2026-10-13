@@ -464,7 +464,7 @@ class DockerController {
       const histOut = await this.execInContainer([
         'sh',
         '-c',
-        'grep -hE "Got handshake|Got character ZDOID|Closing socket|Random event set|Saved [0-9]+ ZDOs|World saved|join code|Valheim version" /var/log/supervisor/valheim-server* 2>/dev/null | tail -n 5000 || true'
+        'grep -hE "Got handshake|Got character ZDOID|Closing socket|Destroying abandoned non persistent zdo|Disconnecting client|Random event set|Saved [0-9]+ ZDOs|World saved|join code|Valheim version|Game server connected" /var/log/supervisor/valheim-server* 2>/dev/null | tail -n 5000 || true'
       ]);
       if (histOut) {
         for (const line of histOut.split(/\r?\n/)) {

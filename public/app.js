@@ -200,8 +200,12 @@ function renderActiveVikings() {
     .map((p) => {
       const isAdmin = adminIds.has(p.steamId);
       const isPermitted = permittedIds.has(p.steamId);
+      const curSessionSec = p.online && p.currentSessionStart
+        ? Math.max(0, Math.floor((Date.now() - new Date(p.currentSessionStart).getTime()) / 1000))
+        : 0;
+      const effectiveTotalPlaytimeSec = (p.totalPlaytimeSeconds || 0) + curSessionSec;
       const sessionDuration = formatDurationFromTimestamp(p.currentSessionStart);
-      const totalHours = ((p.totalPlaytimeSeconds || 0) / 3600).toFixed(1);
+      const totalHours = (effectiveTotalPlaytimeSec / 3600).toFixed(1);
       const initials = getInitials(p.name);
       const liveTelemetry = liveMapPlayers[p.steamId];
       const hpBadge = liveTelemetry
@@ -391,6 +395,10 @@ function renderPlayersTable() {
       const isPermitted = permittedIds.has(p.steamId);
       const isBanned = bannedIds.has(p.steamId);
       const initials = getInitials(p.name);
+      const curSessionSec = p.online && p.currentSessionStart
+        ? Math.max(0, Math.floor((Date.now() - new Date(p.currentSessionStart).getTime()) / 1000))
+        : 0;
+      const effectiveTotalPlaytimeSec = (p.totalPlaytimeSeconds || 0) + curSessionSec;
 
       return `
         <tr>
@@ -421,7 +429,7 @@ function renderPlayersTable() {
             <div class="viking-meta-line">${formatShortDate(p.firstSeen)}</div>
           </td>
           <td>
-            <strong class="text-amber">${formatTotalPlaytime(p.totalPlaytimeSeconds)}</strong>
+            <strong class="text-amber">${formatTotalPlaytime(effectiveTotalPlaytimeSec)}</strong>
           </td>
           <td>${p.sessionsCount || 1}</td>
           <td><strong class="text-crimson">${p.deathsCount || 0}</strong></td>
@@ -994,6 +1002,10 @@ function formatRelativeTime(iso) {
 function formatDurationFromTimestamp(iso) {
   if (!iso) return '0m';
   const diffSec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (diffSec > 86400 * 2) {
+    const days = Math.floor(diffSec / 86400);
+    return `${days}d`;
+  }
   const hrs = Math.floor(diffSec / 3600);
   const mins = Math.floor((diffSec % 3600) / 60);
   return hrs > 0 ? `${hrs}h ${mins}m` : `${Math.max(1, mins)}m`;

@@ -55,8 +55,13 @@ class ValheimLogParser {
     const handshakeMatch = body.match(/Got handshake from client (\d{15,20})/i);
     if (handshakeMatch) {
       const steamId = handshakeMatch[1];
-      this.pendingSteamIds.push({ steamId, timestamp });
-      if (this.pendingSteamIds.length > 10) this.pendingSteamIds.shift();
+      const now = Date.now();
+      // Prune handshakes older than 90 seconds
+      this.pendingSteamIds = this.pendingSteamIds.filter((h) => now - (h.time || 0) <= 90000);
+      if (!this.pendingSteamIds.some((h) => h.steamId === steamId)) {
+        this.pendingSteamIds.push({ steamId, time: now, timestamp });
+      }
+      if (this.pendingSteamIds.length > 15) this.pendingSteamIds.shift();
     }
 
     // 2. Character ZDOID (Spawn/Join or Death 0:0)
@@ -64,21 +69,42 @@ class ValheimLogParser {
     if (zdoMatch) {
       const playerName = zdoMatch[1].trim();
       const zdoId = zdoMatch[2].trim();
-      const playerKey = this.resolvePlayerKey(playerName);
+      const playerKey = this.resolvePlayerKey(playerName, { isHistorical });
 
-      const player = this.state.players[playerKey] || {
-        steamId: playerKey,
-        name: playerName,
-        online: false,
-        currentSessionStart: null,
-        firstSeen: timestamp,
-        lastSeen: timestamp,
-        totalPlaytimeSeconds: 0,
-        sessionsCount: 0,
-        deathsCount: 0,
-        lastZdoId: zdoId,
-        avatarHue: Math.abs(this.hashCode(playerName)) % 360
-      };
+      let player = this.state.players[playerKey];
+      // CRITICAL: Ensure playerKey belongs to playerName, never overwrite an existing player record
+      if (player && player.name && player.name.toLowerCase() !== playerName.toLowerCase()) {
+        const altKey = `vik_${Math.abs(this.hashCode(playerName)).toString(16)}`;
+        player = this.state.players[altKey] || {
+          steamId: altKey,
+          name: playerName,
+          online: false,
+          currentSessionStart: null,
+          firstSeen: timestamp,
+          lastSeen: timestamp,
+          totalPlaytimeSeconds: 0,
+          sessionsCount: 0,
+          deathsCount: 0,
+          lastZdoId: zdoId,
+          avatarHue: Math.abs(this.hashCode(playerName)) % 360
+        };
+        this.state.players[altKey] = player;
+      } else if (!player) {
+        player = {
+          steamId: playerKey,
+          name: playerName,
+          online: false,
+          currentSessionStart: null,
+          firstSeen: timestamp,
+          lastSeen: timestamp,
+          totalPlaytimeSeconds: 0,
+          sessionsCount: 0,
+          deathsCount: 0,
+          lastZdoId: zdoId,
+          avatarHue: Math.abs(this.hashCode(playerName)) % 360
+        };
+        this.state.players[playerKey] = player;
+      }
 
       player.name = playerName;
       player.lastSeen = timestamp;
@@ -132,45 +158,71 @@ class ValheimLogParser {
         }
       }
 
-      this.state.players[playerKey] = player;
       stateChanged = true;
     }
 
-    // 3. Player Disconnect (Closing socket <SteamID64>)
-    const disconnectMatch = body.match(/Closing socket (\d{15,20})/i);
-    if (disconnectMatch) {
-      const steamId = disconnectMatch[1];
-      const player = this.state.players[steamId];
-      if (player && player.online) {
-        player.online = false;
-        player.lastSeen = timestamp;
-        let sessionSeconds = 0;
-        if (player.currentSessionStart) {
-          const diff = Math.floor((new Date(timestamp) - new Date(player.currentSessionStart)) / 1000);
-          if (diff > 0 && diff < 86400 * 3) {
-            sessionSeconds = diff;
-            player.totalPlaytimeSeconds = (player.totalPlaytimeSeconds || 0) + sessionSeconds;
+    // 3. Player Disconnects
+    // Pattern A: Authoritative Valheim ZDO teardown with SteamID64:
+    const zdoDestroyMatch = body.match(/Destroying abandoned non persistent zdo\s+(-?\d+:\d+)\s+owner\s+(\d{15,20})/i);
+    if (zdoDestroyMatch) {
+      const ownerSteamId = zdoDestroyMatch[2];
+      if (this.finalizePlayerDisconnect(ownerSteamId, timestamp, { isHistorical })) {
+        stateChanged = true;
+      }
+    }
+
+    // Pattern B: Closing socket
+    const closeSocketMatch = body.match(/Closing socket\s+(\d+)/i);
+    if (closeSocketMatch) {
+      const sock = closeSocketMatch[1];
+      if (sock.length >= 15) {
+        if (this.finalizePlayerDisconnect(sock, timestamp, { isHistorical })) {
+          stateChanged = true;
+        }
+      } else {
+        const onlineList = Object.values(this.state.players).filter((p) => p.online);
+        if (onlineList.length === 1) {
+          if (this.finalizePlayerDisconnect(onlineList[0].steamId, timestamp, { isHistorical })) {
+            stateChanged = true;
           }
         }
-        player.currentSessionStart = null;
-        this.addEvent({
-          type: 'leave',
-          timestamp,
-          player: player.name,
-          steamId,
-          title: `${player.name} disconnected`,
-          detail: sessionSeconds > 0 ? `Session lasted ${Math.round(sessionSeconds / 60)}m` : `SteamID: ${steamId}`
-        });
-        if (!isHistorical && this.state.settings.notifyOnLeave) {
-          sendDiscordNotification(this.state.settings.discordWebhookUrl, {
-            type: 'leave',
-            serverName: this.state.serverMeta.serverName,
-            message: `**${player.name}** departed from **${this.state.serverMeta.worldName}**.`,
-            fields: [
-              { name: 'Session Time', value: `${Math.max(1, Math.round(sessionSeconds / 60))} mins`, inline: true }
-            ]
-          });
+      }
+    }
+
+    // Pattern C: Disconnecting client
+    const disconnectClientMatch = body.match(/Disconnecting client\s+(\d+)/i);
+    if (disconnectClientMatch) {
+      const targetId = disconnectClientMatch[1];
+      if (targetId.length >= 15) {
+        if (this.finalizePlayerDisconnect(targetId, timestamp, { isHistorical })) {
+          stateChanged = true;
         }
+      } else {
+        const onlineList = Object.values(this.state.players).filter((p) => p.online);
+        if (onlineList.length === 1) {
+          if (this.finalizePlayerDisconnect(onlineList[0].steamId, timestamp, { isHistorical })) {
+            stateChanged = true;
+          }
+        }
+      }
+    }
+
+    // Pattern D: Explicit disconnect messages e.g. "Player <Name> disconnected"
+    const playerDiscMatch = body.match(/Player\s+['"]?([^'"]+?)['"]?\s+disconnected/i);
+    if (playerDiscMatch) {
+      if (this.finalizePlayerDisconnect(playerDiscMatch[1].trim(), timestamp, { isHistorical })) {
+        stateChanged = true;
+      }
+    }
+
+    // Pattern E: Server startup / restart markers (reset all stale sessions from previous runs)
+    if (
+      body.match(/Game server connected/i) ||
+      body.match(/Server ID:\s*\d+/i) ||
+      body.match(/Valheim version:?\s*[0-9.]+/i) ||
+      body.match(/Server registered with join code/i)
+    ) {
+      if (this.finalizeAllSessions(timestamp)) {
         stateChanged = true;
       }
     }
@@ -261,26 +313,128 @@ class ValheimLogParser {
     }
   }
 
-  resolvePlayerKey(playerName) {
-    // Check if we already know this player by name
+  resolvePlayerKey(playerName, { isHistorical = false } = {}) {
+    const adminIds = this.configManager.getAdminSteamIds();
+    const now = Date.now();
+    // Prune stale handshakes older than 90 seconds (unless replaying historical logs)
+    if (!isHistorical) {
+      this.pendingSteamIds = this.pendingSteamIds.filter((h) => now - (h.time || 0) <= 90000);
+    }
+
+    // 1. Check if this player is already known by name
     for (const [key, record] of Object.entries(this.state.players)) {
       if (record.name && record.name.toLowerCase() === playerName.toLowerCase()) {
-        // If we had a synthetic key and now have a pending SteamID, upgrade it
-        if (key.startsWith('viking_') && this.pendingSteamIds.length > 0) {
-          const { steamId } = this.pendingSteamIds.pop();
-          delete this.state.players[key];
-          record.steamId = steamId;
-          this.state.players[steamId] = record;
-          return steamId;
+        // If this record has a real SteamID64:
+        if (/^\d{15,20}$/.test(key)) {
+          // If key is in adminIds, verify it's the known admin
+          if (adminIds.has(key)) {
+            const adminMeta = this.state.aclMeta && this.state.aclMeta[key];
+            const knownAdminName = adminMeta && adminMeta.name ? adminMeta.name.trim() : null;
+            if (knownAdminName && knownAdminName.toLowerCase() !== playerName.toLowerCase()) {
+              // This is a hijacked admin record, do not reuse
+              break;
+            }
+          }
+          return key;
+        }
+
+        // If this record has a synthetic key ('vik_' or 'viking_'):
+        if (key.startsWith('vik_') || key.startsWith('viking_')) {
+          // Check if a pending non-admin SteamID is waiting
+          const suitableIdx = this.pendingSteamIds.findIndex((h) => {
+            if (adminIds.has(h.steamId)) {
+              const adminMeta = this.state.aclMeta && this.state.aclMeta[h.steamId];
+              const knownAdminName = adminMeta && adminMeta.name ? adminMeta.name.trim() : null;
+              return knownAdminName && knownAdminName.toLowerCase() === playerName.toLowerCase();
+            }
+            return true;
+          });
+          if (suitableIdx !== -1) {
+            const [{ steamId }] = this.pendingSteamIds.splice(suitableIdx, 1);
+            delete this.state.players[key];
+            record.steamId = steamId;
+            this.state.players[steamId] = record;
+            return steamId;
+          }
         }
         return key;
       }
     }
-    if (this.pendingSteamIds.length > 0) {
-      const { steamId } = this.pendingSteamIds.pop();
+
+    // 2. Not yet known: match with first suitable pending handshake (FIFO)
+    const suitableIdx = this.pendingSteamIds.findIndex((h) => {
+      if (adminIds.has(h.steamId)) {
+        const adminMeta = this.state.aclMeta && this.state.aclMeta[h.steamId];
+        const knownAdminName = adminMeta && adminMeta.name ? adminMeta.name.trim() : null;
+        return knownAdminName && knownAdminName.toLowerCase() === playerName.toLowerCase();
+      }
+      return true;
+    });
+
+    if (suitableIdx !== -1) {
+      const [{ steamId }] = this.pendingSteamIds.splice(suitableIdx, 1);
       return steamId;
     }
-    return `76561198${String(Math.abs(this.hashCode(playerName))).padStart(9, '0').slice(0, 9)}`;
+
+    // 3. Fallback: generate non-colliding synthetic key vik_${hex}
+    return `vik_${Math.abs(this.hashCode(playerName)).toString(16)}`;
+  }
+
+  finalizePlayerDisconnect(identifier, timestamp, { isHistorical = false } = {}) {
+    if (!identifier) return false;
+    let target = null;
+
+    if (this.state.players[identifier]) {
+      target = this.state.players[identifier];
+    } else {
+      for (const p of Object.values(this.state.players)) {
+        if (p.steamId === identifier || (p.name && p.name.toLowerCase() === String(identifier).toLowerCase())) {
+          target = p;
+          break;
+        }
+      }
+    }
+
+    if (!target) return false;
+
+    if (target.online) {
+      const sessionSeconds = this.configManager.finalizePlayerSession(target, timestamp);
+      this.addEvent({
+        type: 'leave',
+        timestamp,
+        player: target.name,
+        steamId: target.steamId,
+        title: `${target.name} disconnected`,
+        detail: sessionSeconds > 0 ? `Session lasted ${Math.round(sessionSeconds / 60)}m` : `SteamID: ${target.steamId}`
+      });
+
+      if (!isHistorical && this.state.settings.notifyOnLeave) {
+        sendDiscordNotification(this.state.settings.discordWebhookUrl, {
+          type: 'leave',
+          serverName: this.state.serverMeta.serverName,
+          message: `**${target.name}** departed from **${this.state.serverMeta.worldName}**.`,
+          fields: [
+            { name: 'Session Time', value: `${Math.max(1, Math.round(sessionSeconds / 60))} mins`, inline: true }
+          ]
+        });
+      }
+      return true;
+    } else {
+      target.currentSessionStart = null;
+      target.lastSeen = timestamp;
+      return false;
+    }
+  }
+
+  finalizeAllSessions(timestamp) {
+    let changed = false;
+    for (const p of Object.values(this.state.players)) {
+      if (p.online) {
+        this.configManager.finalizePlayerSession(p, timestamp);
+        changed = true;
+      }
+    }
+    return changed;
   }
 
   addEvent(evt) {
@@ -296,7 +450,15 @@ class ValheimLogParser {
   categorizeLine(line) {
     const lower = line.toLowerCase();
     if (lower.includes('zdoid from') && lower.includes(': 0:0')) return 'death';
-    if (lower.includes('handshake') || lower.includes('zdoid from') || lower.includes('closing socket')) return 'player';
+    if (
+      lower.includes('handshake') ||
+      lower.includes('zdoid from') ||
+      lower.includes('closing socket') ||
+      lower.includes('destroying abandoned') ||
+      lower.includes('disconnecting client')
+    ) {
+      return 'player';
+    }
     if (lower.includes('random event set')) return 'raid';
     if (lower.includes('world saved') || lower.includes('saved ') || lower.includes('backup')) return 'save';
     if (lower.includes('error') || lower.includes('exception') || lower.includes('warning')) return 'warn';

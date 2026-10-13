@@ -84,10 +84,11 @@ class ConfigManager {
   }
 
   loadState() {
+    let state = null;
     try {
       if (fs.existsSync(this.statsFile)) {
         const parsed = JSON.parse(fs.readFileSync(this.statsFile, 'utf8'));
-        return {
+        state = {
           players: parsed.players || {},
           events: parsed.events || [],
           worldSaves: parsed.worldSaves || [],
@@ -128,43 +129,175 @@ class ConfigManager {
       }
     } catch (_) {}
 
-    return {
-      players: {},
-      events: [],
-      worldSaves: [],
-      raids: [],
-      serverMeta: {
-        serverName: process.env.SERVER_NAME || 'Valhalla Dedicated',
-        worldName: process.env.WORLD_NAME || 'Midgard',
-        version: '0.219.16 (Ashlands)',
-        networkVersion: '29',
-        joinCode: null,
-        crossplay: process.env.CROSSPLAY === 'true',
-        zdoCount: 0,
-        lastSaveMs: null,
-        lastSaveAt: null
-      },
-      aclMeta: {},
-      settings: {
-        discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL || '',
-        notifyOnJoin: true,
-        notifyOnLeave: true,
-        notifyOnDeath: true,
-        notifyOnRaid: true,
-        notifyOnBackup: true,
-        rconHost: process.env.VALHEIM_HOST || 'valheim-server',
-        rconPort: Number(process.env.RCON_PORT || 2458),
-        rconPass: process.env.RCON_PASS || process.env.SERVER_PASS || '',
-        worldModifiers: {
-          preset: 'Normal',
-          combat: 'default',
-          deathpenalty: 'default',
-          resources: 'default',
-          raids: 'default',
-          portals: 'default'
+    if (!state) {
+      state = {
+        players: {},
+        events: [],
+        worldSaves: [],
+        raids: [],
+        serverMeta: {
+          serverName: process.env.SERVER_NAME || 'Valhalla Dedicated',
+          worldName: process.env.WORLD_NAME || 'Midgard',
+          version: '0.219.16 (Ashlands)',
+          networkVersion: '29',
+          joinCode: null,
+          crossplay: process.env.CROSSPLAY === 'true',
+          zdoCount: 0,
+          lastSaveMs: null,
+          lastSaveAt: null
+        },
+        aclMeta: {},
+        settings: {
+          discordWebhookUrl: process.env.DISCORD_WEBHOOK_URL || '',
+          notifyOnJoin: true,
+          notifyOnLeave: true,
+          notifyOnDeath: true,
+          notifyOnRaid: true,
+          notifyOnBackup: true,
+          rconHost: process.env.VALHEIM_HOST || 'valheim-server',
+          rconPort: Number(process.env.RCON_PORT || 2458),
+          rconPass: process.env.RCON_PASS || process.env.SERVER_PASS || '',
+          worldModifiers: {
+            preset: 'Normal',
+            combat: 'default',
+            deathpenalty: 'default',
+            resources: 'default',
+            raids: 'default',
+            portals: 'default'
+          }
+        }
+      };
+    }
+
+    this.sanitizePlayerState(state);
+    return state;
+  }
+
+  hashCode(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = (hash << 5) - hash + str.charCodeAt(i);
+      hash |= 0;
+    }
+    return hash;
+  }
+
+  getAdminSteamIds() {
+    const adminSet = new Set();
+    const adminFile = path.join(this.configDir, 'adminlist.txt');
+    if (fs.existsSync(adminFile)) {
+      try {
+        const lines = fs.readFileSync(adminFile, 'utf8').split(/\r?\n/);
+        for (const raw of lines) {
+          const line = raw.trim();
+          if (!line || line.startsWith('//') || line.startsWith('#')) continue;
+          const id = line.split(/\s+/)[0];
+          if (id && /^\d{15,20}$/.test(id)) {
+            adminSet.add(id);
+          }
+        }
+      } catch (_) {}
+    }
+    if (process.env.ADMINLIST_IDS) {
+      process.env.ADMINLIST_IDS.split(/[,;\s]+/).forEach((id) => {
+        const clean = id.trim();
+        if (/^\d{15,20}$/.test(clean)) {
+          adminSet.add(clean);
+        }
+      });
+    }
+    return adminSet;
+  }
+
+  finalizePlayerSession(player, endTimestamp = new Date().toISOString()) {
+    if (!player) return 0;
+    let sessionSeconds = 0;
+    if (player.currentSessionStart) {
+      const start = new Date(player.currentSessionStart).getTime();
+      const end = new Date(endTimestamp).getTime();
+      const diff = Math.floor((end - start) / 1000);
+      // Cap individual session at 18 hours max (64800s) to avoid runaway timers from corrupted records
+      if (diff > 0) {
+        sessionSeconds = Math.min(diff, 18 * 3600);
+        player.totalPlaytimeSeconds = (player.totalPlaytimeSeconds || 0) + sessionSeconds;
+      }
+    }
+    player.online = false;
+    player.currentSessionStart = null;
+    player.lastSeen = endTimestamp;
+    return sessionSeconds;
+  }
+
+  sanitizePlayerState(state) {
+    if (!state || !state.players) return;
+    const adminIds = this.getAdminSteamIds();
+    const rekeyedPlayers = {};
+
+    for (const [key, player] of Object.entries(state.players)) {
+      if (!player || typeof player !== 'object') continue;
+
+      const playerName = player.name || 'Unknown Viking';
+      let targetKey = key;
+
+      // 1. Check if this key was generated by legacy synthetic format '76561198${hash}'
+      const legacySynthetic = `76561198${String(Math.abs(this.hashCode(playerName))).padStart(9, '0').slice(0, 9)}`;
+      if (key === legacySynthetic && !adminIds.has(key)) {
+        targetKey = `vik_${Math.abs(this.hashCode(playerName)).toString(16)}`;
+        player.steamId = targetKey;
+      }
+
+      // 2. Disentangle hijacked admin accounts:
+      // If the key is in adminlist.txt, verify whether player.name matches known admin metadata
+      if (adminIds.has(key)) {
+        const adminMeta = state.aclMeta && state.aclMeta[key];
+        const knownAdminName = adminMeta && adminMeta.name ? adminMeta.name.trim() : null;
+
+        // If known admin has a specific name and current player doesn't match it,
+        // this player was mistakenly given the admin's SteamID
+        if (knownAdminName && knownAdminName.toLowerCase() !== playerName.toLowerCase()) {
+          const nonAdminKey = `vik_${Math.abs(this.hashCode(playerName)).toString(16)}`;
+          rekeyedPlayers[nonAdminKey] = {
+            ...player,
+            steamId: nonAdminKey,
+            name: playerName,
+            online: false,
+            currentSessionStart: null
+          };
+
+          targetKey = key;
+          player.name = knownAdminName;
+          player.steamId = key;
+          player.totalPlaytimeSeconds = player.totalPlaytimeSeconds || 0;
+          player.sessionsCount = Math.max(1, player.sessionsCount || 1);
         }
       }
-    };
+
+      // 3. Reset online status on Watchtower boot:
+      // Container/Watchtower restarts cannot carry over active sessions without reconciliation
+      if (player.online) {
+        if (player.currentSessionStart) {
+          const start = new Date(player.currentSessionStart).getTime();
+          const last = player.lastSeen ? new Date(player.lastSeen).getTime() : start;
+          const diff = Math.floor((last - start) / 1000);
+          if (diff > 0) {
+            const capped = Math.min(diff, 18 * 3600);
+            player.totalPlaytimeSeconds = (player.totalPlaytimeSeconds || 0) + capped;
+          }
+        }
+        player.online = false;
+        player.currentSessionStart = null;
+      }
+
+      // 4. Ensure total playtime is sane and non-negative
+      player.totalPlaytimeSeconds = Math.max(0, player.totalPlaytimeSeconds || 0);
+      if (!player.online) {
+        player.currentSessionStart = null;
+      }
+
+      rekeyedPlayers[targetKey] = player;
+    }
+
+    state.players = rekeyedPlayers;
   }
 
   saveState() {
@@ -177,16 +310,20 @@ class ConfigManager {
    * Reads adminlist.txt, bannedlist.txt, permittedlist.txt and enriches with known player names
    */
   getAccessLists() {
+    const adminSet = this.getAdminSteamIds();
     const readList = (filename) => {
       const fullPath = path.join(this.configDir, filename);
-      if (!fs.existsSync(fullPath)) return [];
-      const lines = fs.readFileSync(fullPath, 'utf8').split(/\r?\n/);
+      const lines = fs.existsSync(fullPath)
+        ? fs.readFileSync(fullPath, 'utf8').split(/\r?\n/)
+        : [];
       const ids = [];
+      const seen = new Set();
       for (const raw of lines) {
         const line = raw.trim();
         if (!line || line.startsWith('//') || line.startsWith('#')) continue;
         const steamId = line.split(/\s+/)[0];
-        if (steamId) {
+        if (steamId && !seen.has(steamId)) {
+          seen.add(steamId);
           const playerRecord = this.state.players[steamId];
           const meta = this.state.aclMeta[steamId] || {};
           ids.push({
@@ -195,6 +332,21 @@ class ConfigManager {
             note: meta.note || '',
             addedAt: meta.addedAt || null
           });
+        }
+      }
+      if (filename === 'adminlist.txt') {
+        for (const adminId of adminSet) {
+          if (!seen.has(adminId)) {
+            seen.add(adminId);
+            const playerRecord = this.state.players[adminId];
+            const meta = this.state.aclMeta[adminId] || {};
+            ids.push({
+              steamId: adminId,
+              name: (playerRecord && playerRecord.name) || meta.name || 'Admin Viking',
+              note: meta.note || 'Environment Admin',
+              addedAt: meta.addedAt || null
+            });
+          }
         }
       }
       return ids;
