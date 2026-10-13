@@ -72,17 +72,33 @@ function buildOverviewPayload() {
 // SSE Live Stream
 app.get('/api/stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
 
   res.write(`event: connected\ndata: ${JSON.stringify({ timestamp: new Date().toISOString() })}\n\n`);
   sseClients.add(res);
 
-  req.on('close', () => {
+  const cleanup = () => {
     sseClients.delete(res);
-  });
+  };
+
+  req.on('close', cleanup);
+  res.on('error', cleanup);
 });
+
+// SSE Keepalive Heartbeat (prevents proxy timeouts such as Cloudflare/Nginx 504)
+setInterval(() => {
+  if (sseClients.size === 0) return;
+  for (const res of sseClients) {
+    try {
+      res.write(': ping\n\n');
+    } catch (_) {
+      sseClients.delete(res);
+    }
+  }
+}, 25000);
 
 // Full Dashboard Overview
 app.get('/api/overview', (req, res) => {
@@ -284,10 +300,11 @@ async function start() {
 
   // Broadcast telemetry & live map positions every 3 seconds to connected SSE clients
   setInterval(() => {
+    if (sseClients.size === 0) return;
     broadcastSSE('telemetry', {
       container: dockerController.currentStatus,
       telemetryHistory: dockerController.telemetryHistory,
-      worldMap: mapEngine.getSnapshot(),
+      worldMap: mapEngine.getSnapshot({ includeTerrainGrid: false }),
       onlineCount: Object.values(configManager.state.players).filter((p) => p.online).length
     });
   }, 3000);

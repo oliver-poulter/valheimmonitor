@@ -110,6 +110,10 @@ class ValheimLogParser {
       player.lastSeen = timestamp;
       player.lastZdoId = zdoId;
 
+      if (isHistorical) {
+        return;
+      }
+
       if (zdoId === '0:0') {
         // Player died!
         player.deathsCount = (player.deathsCount || 0) + 1;
@@ -291,10 +295,16 @@ class ValheimLogParser {
     }
 
     // 6. Crossplay Join Code & Version
-    const joinCodeMatch = body.match(/join code\s+(\d{5,8})/i);
+    const joinCodeMatch = body.match(/join code\s+(\d{5,10})/i);
     if (joinCodeMatch) {
       this.state.serverMeta.joinCode = joinCodeMatch[1];
       this.state.serverMeta.crossplay = true;
+      stateChanged = true;
+    }
+
+    const sessionMatch = body.match(/(?:Session|Server)\s+["'](.+?)["']\s+registered with join code/i);
+    if (sessionMatch) {
+      this.state.serverMeta.serverName = sessionMatch[1].trim();
       stateChanged = true;
     }
 
@@ -398,6 +408,12 @@ class ValheimLogParser {
     if (!target) return false;
 
     if (target.online) {
+      if (isHistorical) {
+        target.online = false;
+        target.currentSessionStart = null;
+        target.lastSeen = timestamp;
+        return true;
+      }
       const sessionSeconds = this.configManager.finalizePlayerSession(target, timestamp);
       this.addEvent({
         type: 'leave',

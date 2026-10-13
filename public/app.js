@@ -50,6 +50,11 @@ async function fetchLogs() {
 function connectSSE() {
   const es = new EventSource('/api/stream');
 
+  es.addEventListener('open', () => {
+    // Reconnected after server restart or network hiccup; refresh full state
+    fetchOverview();
+  });
+
   es.addEventListener('log', (e) => {
     try {
       const entry = JSON.parse(e.data);
@@ -70,7 +75,13 @@ function connectSSE() {
         appState.container = payload.container;
         appState.telemetryHistory = payload.telemetryHistory;
         if (payload.worldMap) {
-          appState.worldMap = payload.worldMap;
+          // Preserve existing terrainGrid if the telemetry stream omitted it for bandwidth optimization
+          const existingGrid = appState.worldMap?.terrainGrid;
+          appState.worldMap = {
+            ...appState.worldMap,
+            ...payload.worldMap,
+            terrainGrid: payload.worldMap.terrainGrid || existingGrid
+          };
         }
         renderHeaderAndKpis();
         renderActiveVikings();
@@ -989,7 +1000,9 @@ async function saveCurrentModConfig() {
 /* Formatting Helpers */
 function formatRelativeTime(iso) {
   if (!iso) return 'Never';
-  const diffSec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return 'Never';
+  const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
   if (diffSec < 45) return 'Just now';
   const mins = Math.floor(diffSec / 60);
   if (mins < 60) return `${mins}m ago`;
@@ -1001,7 +1014,9 @@ function formatRelativeTime(iso) {
 
 function formatDurationFromTimestamp(iso) {
   if (!iso) return '0m';
-  const diffSec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '0m';
+  const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
   if (diffSec > 86400 * 2) {
     const days = Math.floor(diffSec / 86400);
     return `${days}d`;
@@ -1012,14 +1027,16 @@ function formatDurationFromTimestamp(iso) {
 }
 
 function formatTotalPlaytime(seconds = 0) {
-  const hrs = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
+  const s = Number(seconds) || 0;
+  const hrs = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
   return `${hrs}h ${mins}m`;
 }
 
 function formatShortDate(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
   return d.toLocaleString(undefined, {
     month: 'short',
     day: 'numeric',
@@ -1031,12 +1048,15 @@ function formatShortDate(iso) {
 function formatLogTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
   return d.toTimeString().slice(0, 8);
 }
 
 function formatUptime(startedAtIso, state) {
   if (state !== 'running' || !startedAtIso) return 'Offline';
-  const sec = Math.max(0, Math.floor((Date.now() - new Date(startedAtIso).getTime()) / 1000));
+  const t = new Date(startedAtIso).getTime();
+  if (Number.isNaN(t)) return 'Offline';
+  const sec = Math.max(0, Math.floor((Date.now() - t) / 1000));
   const d = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);
   const m = Math.floor((sec % 3600) / 60);
@@ -1093,6 +1113,16 @@ let isDraggingMap = false;
 let dragStartX = 0;
 let dragStartY = 0;
 let mapCanvasInitialized = false;
+let mapRenderScheduled = false;
+
+function requestMapRedraw() {
+  if (mapRenderScheduled) return;
+  mapRenderScheduled = true;
+  requestAnimationFrame(() => {
+    mapRenderScheduled = false;
+    drawValheimMap();
+  });
+}
 
 function initMapCanvasInteraction() {
   if (mapCanvasInitialized) return;
@@ -1135,7 +1165,7 @@ function initMapCanvasInteraction() {
       mapPanZ += (e.clientY - dragStartY) * scaleY;
       dragStartX = e.clientX;
       dragStartY = e.clientY;
-      drawValheimMap();
+      requestMapRedraw();
     }
   });
 
@@ -1145,7 +1175,7 @@ function initMapCanvasInteraction() {
       e.preventDefault();
       const factor = e.deltaY < 0 ? 1.18 : 0.85;
       mapZoom = Math.max(0.75, Math.min(8.0, mapZoom * factor));
-      drawValheimMap();
+      requestMapRedraw();
     },
     { passive: false }
   );
@@ -1155,7 +1185,7 @@ function resetMapView() {
   mapZoom = 1.0;
   mapPanX = 0;
   mapPanZ = 0;
-  drawValheimMap();
+  requestMapRedraw();
 }
 
 function focusMapOnCoords(x, z, label = '') {
@@ -1347,7 +1377,12 @@ function renderLiveMapAndVitals() {
     `
     );
 
-    poiContainer.innerHTML = [...tombs, ...portals].join('');
+    const combined = [...tombs, ...portals];
+    if (combined.length === 0) {
+      poiContainer.innerHTML = '<div class="viking-meta-line" style="padding:0.75rem">No active portals or death tombstones recorded.</div>';
+    } else {
+      poiContainer.innerHTML = combined.join('');
+    }
   }
 
   drawValheimMap();

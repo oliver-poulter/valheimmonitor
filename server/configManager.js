@@ -40,7 +40,7 @@ class ConfigManager {
     const puid = Number(process.env.PUID || 0);
     const pgid = Number(process.env.PGID || 0);
     try {
-      fs.chmodSync(targetPath, 0o775);
+      fs.chmodSync(targetPath, 0o777);
       if (puid > 0 || pgid > 0) {
         fs.chownSync(targetPath, puid, pgid);
       }
@@ -303,6 +303,7 @@ class ConfigManager {
   saveState() {
     try {
       fs.writeFileSync(this.statsFile, JSON.stringify(this.state, null, 2), 'utf8');
+      this.applyOwnership(this.statsFile);
     } catch (_) {}
   }
 

@@ -67,7 +67,7 @@ class DockerController {
         await this.refreshContainerStatus();
         this.attachContainerLogs();
 
-        // Automatically install or upgrade WatchtowerMapExporter.dll to v1.4.0 inside valheim-server if not yet on v1.4.0
+        // Automatically install or upgrade WatchtowerMapExporter.dll to v1.5.0 inside valheim-server if not yet on v1.5.0
         if (process.env.AUTO_CONFIGURE_SERVER !== 'false') {
           setTimeout(() => {
             try {
@@ -75,7 +75,7 @@ class DockerController {
               let alreadyLatest = false;
               if (fs.existsSync(liveMapPath)) {
                 const parsed = JSON.parse(fs.readFileSync(liveMapPath, 'utf8'));
-                if (parsed && parsed.pluginVersion === '1.4.0' && parsed.pluginStatus === 'active') {
+                if (parsed && parsed.pluginVersion === '1.5.0' && parsed.pluginStatus === 'active') {
                   alreadyLatest = true;
                 }
               }
@@ -134,8 +134,8 @@ class DockerController {
       this.currentStatus.autoConfigState = 'configured';
       return {
         ok: true,
-        output: '[Preview Mode] Deployed WatchtowerMapExporter.dll v1.4.0 to /config/bepinex/plugins/',
-        message: 'Deployed WatchtowerMapExporter.dll v1.4.0 to /config/bepinex/plugins/ (Preview Mode).'
+        output: '[Preview Mode] Deployed WatchtowerMapExporter.dll v1.5.0 to /config/bepinex/plugins/',
+        message: 'Deployed WatchtowerMapExporter.dll v1.5.0 to /config/bepinex/plugins/ (Preview Mode).'
       };
     }
 
@@ -182,7 +182,7 @@ class DockerController {
       mkdir -p /opt/valheim/bepinex/BepInEx/plugins
       if [ -f /config/bepinex/plugins/WatchtowerMapExporter.dll ]; then
         cp -f /config/bepinex/plugins/WatchtowerMapExporter.dll /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll || true
-        echo "Installed WatchtowerMapExporter.dll v1.4.0 into /opt/valheim/bepinex/BepInEx/plugins/"
+        echo "Installed WatchtowerMapExporter.dll v1.5.0 into /opt/valheim/bepinex/BepInEx/plugins/"
       fi
 
       # Ensure non-root Valheim server user (PUID/PGID) owns BepInEx and can write to /config/watchtower
@@ -192,11 +192,11 @@ class DockerController {
       chmod -R 777 /config/watchtower 2>/dev/null || true
 
       if [ "${forceRestart ? '1' : '0'}" = "1" ] || [ "$NEEDS_RESTART" = "1" ]; then
-        echo "[5/5] Gracefully restarting valheim-server with BepInEx v1.4.0 enabled..."
+        echo "[5/5] Gracefully restarting valheim-server with BepInEx v1.5.0 enabled..."
         supervisorctl restart valheim-server || true
         echo "RESTARTED_WITH_BEPINEX"
       else
-        echo "[5/5] BepInEx and WatchtowerMapExporter.dll v1.4.0 already active."
+        echo "[5/5] BepInEx and WatchtowerMapExporter.dll v1.5.0 already active."
         echo "ALREADY_CONFIGURED"
       fi
     `;
@@ -209,7 +209,7 @@ class DockerController {
         JSON.stringify(
           {
             pluginStatus: 'configuring_and_restarting_server',
-            pluginVersion: '1.4.0',
+            pluginVersion: '1.5.0',
             worldName: this.configManager.state.serverMeta.worldName || 'Dedicated',
             lastUpdated: timestamp,
             players: []
@@ -393,22 +393,25 @@ class DockerController {
           this.currentStatus.netTxMb = Number((tx / (1024 * 1024)).toFixed(1));
         }
 
-        // Also check supervisorctl status
-        try {
-          const supOut = await this.execInContainer(['supervisorctl', 'status']);
-          if (supOut) {
-            const services = [];
-            for (const line of supOut.split(/\r?\n/)) {
-              const m = line.trim().match(/^([a-zA-Z0-9_-]+)\s+([A-Z]+)\s+(.*)$/);
-              if (m) {
-                services.push({ name: m[1], state: m[2], description: m[3] });
+        // Also check supervisorctl status every 12s (every 3rd poll) to prevent unnecessary exec churn
+        this.supervisorPollCount = (this.supervisorPollCount || 0) + 1;
+        if (this.supervisorPollCount % 3 === 0) {
+          try {
+            const supOut = await this.execInContainer(['supervisorctl', 'status']);
+            if (supOut) {
+              const services = [];
+              for (const line of supOut.split(/\r?\n/)) {
+                const m = line.trim().match(/^([a-zA-Z0-9_-]+)\s+([A-Z]+)\s+(.*)$/);
+                if (m) {
+                  services.push({ name: m[1], state: m[2], description: m[3] });
+                }
+              }
+              if (services.length > 0) {
+                this.currentStatus.supervisorServices = services;
               }
             }
-            if (services.length > 0) {
-              this.currentStatus.supervisorServices = services;
-            }
-          }
-        } catch (_) {}
+          } catch (_) {}
+        }
       }
     } catch (_) {}
 
@@ -460,25 +463,29 @@ class DockerController {
     }
 
     // 1. Scan rotated supervisor logs inside lloesche/valheim-server for historical sessions
+    // Only if players state is not already persisted, avoiding slow startup greps
     try {
-      const histOut = await this.execInContainer([
-        'sh',
-        '-c',
-        'grep -hE "Got handshake|Got character ZDOID|Closing socket|Destroying abandoned non persistent zdo|Disconnecting client|Random event set|Saved [0-9]+ ZDOs|World saved|join code|Valheim version|Game server connected" /var/log/supervisor/valheim-server* 2>/dev/null | tail -n 5000 || true'
-      ]);
-      if (histOut) {
-        for (const line of histOut.split(/\r?\n/)) {
-          this.logParser.processLine(line, { isHistorical: true });
+      const hasKnownPlayers = Object.keys(this.configManager.state.players || {}).length > 0;
+      if (!hasKnownPlayers) {
+        const histOut = await this.execInContainer([
+          'sh',
+          '-c',
+          'grep -hE "Got handshake|Got character ZDOID|Closing socket|Destroying abandoned non persistent zdo|Disconnecting client|Random event set|Saved [0-9]+ ZDOs|World saved|join code|Valheim version|Game server connected" /var/log/supervisor/valheim-server* 2>/dev/null | tail -n 2000 || true'
+        ]);
+        if (histOut) {
+          for (const line of histOut.split(/\r?\n/)) {
+            this.logParser.processLine(line, { isHistorical: true });
+          }
+          this.configManager.saveState();
         }
-        this.configManager.saveState();
       }
     } catch (_) {}
 
-    // 2. Attach to Docker stdout/stderr stream with 10,000-line history tail
+    // 2. Attach to Docker stdout/stderr stream with 500-line history tail (fast startup & matches dashboard ring buffer)
     const req = http.request(
       {
         socketPath: DOCKER_SOCKET,
-        path: `/containers/${this.containerId}/logs?stdout=true&stderr=true&follow=true&tail=10000`,
+        path: `/containers/${this.containerId}/logs?stdout=true&stderr=true&follow=true&tail=500`,
         method: 'GET'
       },
       (res) => {

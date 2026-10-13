@@ -48,7 +48,7 @@ namespace HeimdallWatchtower
             {
                 Directory.CreateDirectory("/config/watchtower");
                 WriteBootstrapStatus("plugin_loaded_booting_world");
-                Logger.LogInfo("[Heimdall Watchtower] Live Map, Terrain & Health ZDO Exporter v1.4.0 initialized.");
+                Logger.LogInfo("[Heimdall Watchtower] Live Map, Terrain & Health ZDO Exporter v1.5.0 initialized.");
             }
             catch (Exception ex)
             {
@@ -63,10 +63,10 @@ namespace HeimdallWatchtower
                 var sb = new StringBuilder();
                 sb.Append("{\n");
                 sb.AppendFormat("  \"pluginStatus\": \"{0}\",\n", EscapeJson(status));
-                sb.Append("  \"pluginVersion\": \"1.4.0\",\n");
+                sb.Append("  \"pluginVersion\": \"1.5.0\",\n");
                 sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
                 sb.Append("  \"players\": []\n}\n");
-                File.WriteAllText(OutputPath, sb.ToString(), Encoding.UTF8);
+                AtomicWriteText(OutputPath, sb.ToString());
             }
             catch
             {
@@ -224,7 +224,7 @@ namespace HeimdallWatchtower
                 sb.Append("  \"landmarks\": [\n");
                 AppendZoneLandmarks(sb);
                 sb.Append("\n  ]\n}\n");
-                File.WriteAllText(TerrainOutputPath, sb.ToString(), Encoding.UTF8);
+                AtomicWriteText(TerrainOutputPath, sb.ToString());
                 Logger.LogInfo("[Heimdall Watchtower] Exported exact WorldGenerator terrain & biome map to " + TerrainOutputPath);
             }
         }
@@ -646,7 +646,22 @@ namespace HeimdallWatchtower
             }
 
             sb.Append("\n  ]\n}\n");
-            File.WriteAllText(OutputPath, sb.ToString(), Encoding.UTF8);
+            AtomicWriteText(OutputPath, sb.ToString());
+        }
+
+        private static void AtomicWriteText(string destinationPath, string content)
+        {
+            try
+            {
+                string tempPath = destinationPath + ".tmp";
+                File.WriteAllText(tempPath, content, Encoding.UTF8);
+                File.Copy(tempPath, destinationPath, true);
+                try { File.Delete(tempPath); } catch { }
+            }
+            catch
+            {
+                try { File.WriteAllText(destinationPath, content, Encoding.UTF8); } catch { }
+            }
         }
 
         private static string EscapeJson(string s)

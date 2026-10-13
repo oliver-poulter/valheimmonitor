@@ -172,7 +172,11 @@ class ValheimMapEngine {
   tickLiveState() {
     this.loadTerrainFileIfUpdated();
     if (this.isDockerMode) {
-      this.inspectRealWorldFiles();
+      const now = Date.now();
+      if (!this.lastFwlScan || now - this.lastFwlScan > 60000 || this.mapState.seedNumeric === 0) {
+        this.lastFwlScan = now;
+        this.inspectRealWorldFiles();
+      }
     }
 
     // 1. Always check if the real BepInEx plugin wrote /config/watchtower/live_map.json
@@ -495,11 +499,15 @@ class ValheimMapEngine {
     ];
   }
 
-  getSnapshot() {
-    return {
+  getSnapshot({ includeTerrainGrid = true } = {}) {
+    const snap = {
       ...this.mapState,
       livePlayersList: Object.values(this.mapState.livePlayers)
     };
+    if (!includeTerrainGrid) {
+      delete snap.terrainGrid;
+    }
+    return snap;
   }
 }
 
