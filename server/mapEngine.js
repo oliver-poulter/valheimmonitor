@@ -35,12 +35,7 @@ class ValheimMapEngine {
       livePlayers: {},
       portals: [],
       landmarks: [
-        { id: 'lm-spawn', type: 'spawn', name: 'Sacrificial Stones', x: 0, z: 0, biome: 'Meadows', icon: '🏛️', status: 'Active' },
-        { id: 'lm-eikthyr', type: 'boss', name: 'EIKTHYR', x: -180, z: -340, biome: 'Meadows', icon: '🦌', status: 'Forsaken Altar' },
-        { id: 'lm-elder', type: 'boss', name: 'THE ELDER', x: 1420, z: 1180, biome: 'Black Forest', icon: '🌲', status: 'Forsaken Altar' },
-        { id: 'lm-bonemass', type: 'boss', name: 'BONEMASS', x: -2450, z: 1850, biome: 'Swamp', icon: '☠️', status: 'Forsaken Altar' },
-        { id: 'lm-moder', type: 'boss', name: 'MODER', x: 2150, z: -2680, biome: 'Mountains', icon: '🐉', status: 'Forsaken Altar' },
-        { id: 'lm-yagluth', type: 'boss', name: 'YAGLUTH', x: -3850, z: -2150, biome: 'Plains', icon: '👑', status: 'Forsaken Altar' }
+        { id: 'lm-spawn', type: 'spawn', name: 'Sacrificial Stones', x: 0, z: 0, biome: 'Meadows', icon: '🏛️', status: 'Active' }
       ],
       tombstones: []
     };
@@ -62,12 +57,18 @@ class ValheimMapEngine {
       if (stat.mtimeMs <= this.terrainMtime) return;
       this.terrainMtime = stat.mtimeMs;
       const raw = JSON.parse(fs.readFileSync(this.worldTerrainFile, 'utf8'));
-      if (raw && raw.biomesBase64 && raw.heightsBase64) {
+      const b64Biomes = raw && (raw.biomesBase64 || raw.biomesB64);
+      const b64Heights = raw && (raw.heightsBase64 || raw.heightsB64);
+      if (raw && b64Biomes && b64Heights) {
+        const gridRes = raw.gridSize || raw.resolution || 200;
         this.mapState.terrainGrid = {
-          gridSize: raw.gridSize || 200,
+          gridSize: gridRes,
+          resolution: gridRes,
           seaLevelByte: raw.seaLevelByte || 40,
-          biomesBase64: raw.biomesBase64,
-          heightsBase64: raw.heightsBase64
+          biomesBase64: b64Biomes,
+          biomesB64: b64Biomes,
+          heightsBase64: b64Heights,
+          heightsB64: b64Heights
         };
         if (Array.isArray(raw.landmarks) && raw.landmarks.length > 0) {
           this.mapState.landmarks = raw.landmarks;
@@ -361,7 +362,9 @@ class ValheimMapEngine {
     }
     if (Array.isArray(payload.portals)) this.mapState.portals = payload.portals;
     if (Array.isArray(payload.tombstones)) this.mapState.tombstones = payload.tombstones;
-    if (Array.isArray(payload.landmarks)) this.mapState.landmarks = payload.landmarks;
+    if (Array.isArray(payload.landmarks) && payload.landmarks.length > 0) {
+      this.mapState.landmarks = payload.landmarks;
+    }
   }
 
   recordExplorationPoint(x, z, playerName) {
@@ -496,6 +499,14 @@ class ValheimMapEngine {
         createdAt: new Date(Date.now() - 19 * 60 * 1000).toISOString(),
         itemsCount: 24
       }
+    ];
+    this.mapState.landmarks = [
+      { id: 'lm-spawn', type: 'spawn', name: 'Sacrificial Stones', x: 0, z: 0, biome: 'Meadows', icon: '🏛️', status: 'Spawn Altar' },
+      { id: 'lm-eikthyr', type: 'boss', name: 'EIKTHYR', x: -180, z: -340, biome: 'Meadows', icon: '🦌', status: 'Forsaken Altar' },
+      { id: 'lm-elder', type: 'boss', name: 'THE ELDER', x: 1420, z: 1180, biome: 'Black Forest', icon: '🌲', status: 'Forsaken Altar' },
+      { id: 'lm-bonemass', type: 'boss', name: 'BONEMASS', x: -2450, z: 1850, biome: 'Swamp', icon: '☠️', status: 'Forsaken Altar' },
+      { id: 'lm-moder', type: 'boss', name: 'MODER', x: 2150, z: -2680, biome: 'Mountains', icon: '🐉', status: 'Forsaken Altar' },
+      { id: 'lm-yagluth', type: 'boss', name: 'YAGLUTH', x: -3850, z: -2150, biome: 'Plains', icon: '👑', status: 'Forsaken Altar' }
     ];
   }
 

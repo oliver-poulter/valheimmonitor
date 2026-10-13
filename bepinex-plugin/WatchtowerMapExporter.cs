@@ -251,22 +251,35 @@ namespace HeimdallWatchtower
                     object posObj = vType.GetField("m_position")?.GetValue(val);
                     if (locObj == null || posObj == null) continue;
 
-                    string prefabName = locObj.GetType().GetField("m_prefabName")?.GetValue(locObj) as string ?? "";
+                    string prefabName = locObj.GetType().GetField("m_prefabName")?.GetValue(locObj) as string
+                                     ?? locObj.GetType().GetProperty("m_prefabName")?.GetValue(locObj, null) as string
+                                     ?? "";
+                    if (string.IsNullOrEmpty(prefabName))
+                    {
+                        var prefabObj = locObj.GetType().GetField("m_prefab")?.GetValue(locObj)
+                                     ?? locObj.GetType().GetProperty("m_prefab")?.GetValue(locObj, null);
+                        if (prefabObj != null)
+                        {
+                            prefabName = prefabObj.GetType().GetProperty("name")?.GetValue(prefabObj, null) as string ?? "";
+                        }
+                    }
                     if (string.IsNullOrEmpty(prefabName)) continue;
 
                     string label = null;
                     string icon = "📍";
                     string ltype = "boss";
-                    if (prefabName == "StartTemple") { label = "Sacrificial Stones"; icon = "🏛️"; ltype = "spawn"; }
-                    else if (prefabName.StartsWith("Eikthyrnir")) { label = "EIKTHYR"; icon = "🦌"; }
-                    else if (prefabName.StartsWith("GDKing")) { label = "THE ELDER"; icon = "🌲"; }
-                    else if (prefabName.StartsWith("Bonemass")) { label = "BONEMASS"; icon = "☠️"; }
-                    else if (prefabName.StartsWith("Dragonqueen")) { label = "MODER"; icon = "🐉"; }
-                    else if (prefabName.StartsWith("GoblinKing")) { label = "YAGLUTH"; icon = "👑"; }
-                    else if (prefabName.StartsWith("Mistlands_DvergrBossEntrance")) { label = "THE QUEEN"; icon = "🪲"; }
-                    else if (prefabName.StartsWith("CharredFortress") || prefabName.StartsWith("Fader")) { label = "FADER"; icon = "🔥"; }
-                    else if (prefabName.StartsWith("Vendor_BlackForest")) { label = "HALDOR"; icon = "💰"; ltype = "trader"; }
-                    else if (prefabName.StartsWith("Hildir_camp")) { label = "HILDIR"; icon = "⛺"; ltype = "trader"; }
+                    string biome = "Unknown";
+                    if (prefabName == "StartTemple") { label = "Sacrificial Stones"; icon = "🏛️"; ltype = "spawn"; biome = "Meadows"; }
+                    else if (prefabName.StartsWith("Eikthyrnir")) { label = "EIKTHYR"; icon = "🦌"; biome = "Meadows"; }
+                    else if (prefabName.StartsWith("GDKing")) { label = "THE ELDER"; icon = "🌲"; biome = "Black Forest"; }
+                    else if (prefabName.StartsWith("Bonemass")) { label = "BONEMASS"; icon = "☠️"; biome = "Swamp"; }
+                    else if (prefabName.StartsWith("Dragonqueen")) { label = "MODER"; icon = "🐉"; biome = "Mountains"; }
+                    else if (prefabName.StartsWith("GoblinKing")) { label = "YAGLUTH"; icon = "👑"; biome = "Plains"; }
+                    else if (prefabName.StartsWith("Mistlands_DvergrBossEntrance")) { label = "THE QUEEN"; icon = "🪲"; biome = "Mistlands"; }
+                    else if (prefabName.StartsWith("CharredFortress") || prefabName.StartsWith("Fader")) { label = "FADER"; icon = "🔥"; biome = "Ashlands"; }
+                    else if (prefabName.StartsWith("Vendor_BlackForest")) { label = "HALDOR"; icon = "💰"; ltype = "trader"; biome = "Black Forest"; }
+                    else if (prefabName.StartsWith("Hildir_camp")) { label = "HILDIR"; icon = "⛺"; ltype = "trader"; biome = "Plains"; }
+                    else if (prefabName.StartsWith("BogWitch_Camp")) { label = "BOG WITCH"; icon = "🧙"; ltype = "trader"; biome = "Swamp"; }
 
                     if (label == null) continue;
 
@@ -277,10 +290,10 @@ namespace HeimdallWatchtower
                     if (!first) sb.Append(",\n");
                     first = false;
                     sb.Append("    { ");
-                    sb.AppendFormat(CultureInfo.InvariantCulture, "\"id\": \"lm-{0}\", \"type\": \"{1}\", \"name\": \"{2}\", \"icon\": \"{3}\", \"x\": {4:F0}, \"z\": {5:F0}",
-                        count++, ltype, EscapeJson(label), EscapeJson(icon), x, z);
+                    sb.AppendFormat(CultureInfo.InvariantCulture, "\"id\": \"lm-{0}\", \"type\": \"{1}\", \"name\": \"{2}\", \"icon\": \"{3}\", \"biome\": \"{4}\", \"x\": {5:F0}, \"z\": {6:F0}",
+                        count++, ltype, EscapeJson(label), EscapeJson(icon), EscapeJson(biome), x, z);
                     sb.Append(" }");
-                    if (count >= 35) break;
+                    if (count >= 40) break;
                 }
             }
             catch
@@ -645,6 +658,9 @@ namespace HeimdallWatchtower
                 }
             }
 
+            sb.Append("\n  ],\n");
+            sb.Append("  \"landmarks\": [\n");
+            AppendZoneLandmarks(sb);
             sb.Append("\n  ]\n}\n");
             AtomicWriteText(OutputPath, sb.ToString());
         }

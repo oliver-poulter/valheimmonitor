@@ -2116,11 +2116,33 @@ function estimateClientBiome(x, z) {
   return 'Ocean';
 }
 
+let isFetchingTerrainGrid = false;
+
 function renderLiveMapAndVitals() {
   if (!appState || !appState.worldMap) return;
   initMapCanvasInteraction();
 
   const wm = appState.worldMap;
+  if (!wm.terrainGrid && !isFetchingTerrainGrid) {
+    isFetchingTerrainGrid = true;
+    fetch('/api/world-map')
+      .then((r) => r.json())
+      .then((data) => {
+        if (data && data.terrainGrid) {
+          if (appState && appState.worldMap) {
+            appState.worldMap.terrainGrid = data.terrainGrid;
+            if (Array.isArray(data.landmarks) && data.landmarks.length > 0) {
+              appState.worldMap.landmarks = data.landmarks;
+            }
+            invalidateTerrainCacheAndDraw();
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        setTimeout(() => { isFetchingTerrainGrid = false; }, 8000);
+      });
+  }
   ensureValheimTerrainCache(wm);
   const worldLabel = document.getElementById('mapWorldNameLabel');
   const seedLabel = document.getElementById('mapSeedLabel');
@@ -2406,7 +2428,9 @@ function decodeBase64ToUint8(b64) {
 }
 
 function ensureValheimTerrainCache(wm) {
-  const seedKey = `${wm.seedNumeric || wm.seedName || 'default'}-${TERRAIN_RES}`;
+  const tg = wm.terrainGrid;
+  const gridSig = tg ? `${tg.resolution || tg.gridSize || ''}-${(tg.heightsB64 || tg.heightsBase64 || '').length}` : 'nogrid';
+  const seedKey = `${wm.seedNumeric || wm.seedName || 'default'}-${TERRAIN_RES}-${gridSig}`;
   if (cachedTerrainCanvas && cachedTerrainSeed === seedKey) {
     return cachedTerrainCanvas;
   }
@@ -2435,19 +2459,28 @@ function ensureValheimTerrainCache(wm) {
 
   const heights = new Float32Array(TERRAIN_RES * TERRAIN_RES);
   const biomes = new Uint8Array(TERRAIN_RES * TERRAIN_RES);
-  const seaLevel = 0.38;
 
   let serverHeights = null;
   let serverBiomes = null;
   let serverGridRes = 0;
 
-  if (wm.terrainGrid && wm.terrainGrid.resolution && wm.terrainGrid.heightsB64 && wm.terrainGrid.biomesB64) {
-    try {
-      serverGridRes = wm.terrainGrid.resolution;
-      serverHeights = decodeBase64ToUint8(wm.terrainGrid.heightsB64);
-      serverBiomes = decodeBase64ToUint8(wm.terrainGrid.biomesB64);
-    } catch (_) {}
+  if (tg) {
+    const res = tg.resolution || tg.gridSize;
+    const hB64 = tg.heightsB64 || tg.heightsBase64;
+    const bB64 = tg.biomesB64 || tg.biomesBase64;
+    if (res && hB64 && bB64) {
+      try {
+        serverGridRes = res;
+        serverHeights = decodeBase64ToUint8(hB64);
+        serverBiomes = decodeBase64ToUint8(bB64);
+      } catch (_) {}
+    }
   }
+
+  const isServerGrid = Boolean(serverHeights && serverBiomes && serverGridRes > 0);
+  const seaLevel = isServerGrid
+    ? ((tg && tg.seaLevelByte ? tg.seaLevelByte : 40) / 255.0)
+    : 0.38;
 
   for (let py = 0; py < TERRAIN_RES; py++) {
     for (let px = 0; px < TERRAIN_RES; px++) {
@@ -2598,7 +2631,7 @@ function ensureValheimTerrainCache(wm) {
       const b = biomes[idx];
 
       if (b === 0 || h < seaLevel) {
-        const depth = Math.max(0, Math.min(1, (seaLevel - h) / seaLevel));
+        const depth = Math.max(0, Math.min(1, (seaLevel - h) / Math.max(0.01, seaLevel)));
         const wave = noise2D(px * 0.18, py * 0.18) * 6;
         let r, g, bl;
         if (depth < 0.08) {
