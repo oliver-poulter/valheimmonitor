@@ -83,7 +83,7 @@ class DockerController {
               // Also check inside valheim-server container if SpreadTheLoad.dll is present
               let containerMissingMods = false;
               try {
-                const checkRes = await this.execContainer('test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && echo "PRESENT"');
+                const checkRes = await this.execInContainer(['/bin/bash', '-c', 'test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && echo "PRESENT"']);
                 if (!checkRes || !checkRes.includes('PRESENT')) {
                   containerMissingMods = true;
                 }
@@ -213,11 +213,16 @@ class DockerController {
         NEEDS_RESTART=1
       fi
 
-      mkdir -p /opt/valheim/bepinex/BepInEx/plugins
+      mkdir -p /opt/valheim/bepinex/BepInEx/plugins /config/bepinex/plugins /config/bepinex/config
       if [ -d /config/bepinex/plugins ]; then
         cp -f /config/bepinex/plugins/*.dll /opt/valheim/bepinex/BepInEx/plugins/ 2>/dev/null || true
         echo "Installed & synchronized performance suite into /opt/valheim/bepinex/BepInEx/plugins/"
       fi
+
+      # Symlink LogOutput.log and config directory so Watchtower can inspect live logs & configs directly in /config/bepinex/
+      touch /opt/valheim/bepinex/BepInEx/LogOutput.log 2>/dev/null || true
+      ln -sfn /opt/valheim/bepinex/BepInEx/LogOutput.log /config/bepinex/LogOutput.log 2>/dev/null || true
+      cp -rn /opt/valheim/bepinex/BepInEx/config/* /config/bepinex/config/ 2>/dev/null || true
 
       # Ensure non-root Valheim server user (PUID/PGID) owns BepInEx and can write to /config/watchtower
       TARGET_UID=\${PUID:-3001}

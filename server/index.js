@@ -45,7 +45,8 @@ function buildOverviewPayload() {
   const accessLists = configManager.getAccessLists();
   const mods = configManager.getModConfigs({
     containerStatus: dockerController.currentStatus,
-    loadedPluginsFromLogs: logParser.loadedBepInExPlugins
+    loadedPluginsFromLogs: logParser.loadedBepInExPlugins,
+    bepinexConfirmedEnabled: Boolean(logParser.bepinexConfirmedEnabled)
   });
 
   return {
@@ -230,7 +231,8 @@ app.get('/api/mods', (req, res) => {
     ok: true,
     mods: configManager.getModConfigs({
       containerStatus: dockerController.currentStatus,
-      loadedPluginsFromLogs: logParser.loadedBepInExPlugins
+      loadedPluginsFromLogs: logParser.loadedBepInExPlugins,
+      bepinexConfirmedEnabled: Boolean(logParser.bepinexConfirmedEnabled)
     })
   });
 });

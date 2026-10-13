@@ -230,10 +230,25 @@ class ValheimLogParser {
       if (this.finalizeAllSessions(timestamp)) {
         stateChanged = true;
       }
-      this.loadedBepInExPlugins.clear();
     }
 
     // Pattern F: BepInEx plugin chainloader tracking from stdout
+    const lowerBody = body.toLowerCase();
+    if (lowerBody.includes('bepinex is enabled')) {
+      this.bepinexConfirmedEnabled = true;
+    }
+    if (lowerBody.includes('spreadtheload')) {
+      this.loadedBepInExPlugins.add('spreadtheload');
+    }
+    if (lowerBody.includes('betternetworking')) {
+      this.loadedBepInExPlugins.add('betternetworking');
+    }
+    if (lowerBody.includes('serverdevcommands') || lowerBody.includes('server devcommands')) {
+      this.loadedBepInExPlugins.add('serverdevcommands');
+    }
+    if (lowerBody.includes('watchtowermapexporter')) {
+      this.loadedBepInExPlugins.add('watchtowermapexporter');
+    }
     const bepinexPluginMatch = body.match(/\[(?:Info|Message)\s*:\s*BepInEx\]\s*(?:Loading\s*\[(.+?)(?:\s+[\d\.]+)?\]|Loaded\s*\[(.+?)\])/i);
     if (bepinexPluginMatch) {
       const pName = (bepinexPluginMatch[1] || bepinexPluginMatch[2] || '').trim();

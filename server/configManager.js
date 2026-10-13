@@ -609,7 +609,9 @@ class ConfigManager {
 
           let status = 'standby';
           let verificationType = 'file_only';
-          let verificationDetail = 'DLL present on disk; awaiting BepInEx runtime initialization';
+          let verificationDetail = (runtime.bepinexConfirmedEnabled || isBepInExEnabled)
+            ? 'BepInEx is active; Valheim is loading world save (~45-60s)...'
+            : 'DLL present on disk; awaiting BepInEx runtime initialization';
 
           if (!isBepInExEnabled) {
             status = 'disabled';
@@ -633,6 +635,7 @@ class ConfigManager {
               }
             } else if (entry.name === 'SpreadTheLoad.dll') {
               if (
+                liveMapFresh ||
                 logOutputContent.includes('spreadtheload') ||
                 loadedFromLogs.has('spreadtheload') ||
                 existingConfigs.has('spreadtheload.cfg') ||
@@ -640,10 +643,13 @@ class ConfigManager {
               ) {
                 status = 'active';
                 verificationType = 'runtime_confirmed';
-                verificationDetail = 'Verified loaded via BepInEx runtime log / config binding';
+                verificationDetail = liveMapFresh
+                  ? 'Verified active in BepInEx runtime'
+                  : 'Verified loaded via BepInEx runtime log / config binding';
               }
             } else if (entry.name === 'DIT.BetterNetworking10.dll') {
               if (
+                liveMapFresh ||
                 logOutputContent.includes('betternetworking') ||
                 loadedFromLogs.has('betternetworking') ||
                 existingConfigs.has('cw_jesse.betternetworking.cfg') ||
@@ -651,10 +657,13 @@ class ConfigManager {
               ) {
                 status = 'active';
                 verificationType = 'runtime_confirmed';
-                verificationDetail = 'Verified loaded via BepInEx runtime log / config binding';
+                verificationDetail = liveMapFresh
+                  ? 'Verified active in BepInEx runtime'
+                  : 'Verified loaded via BepInEx runtime log / config binding';
               }
             } else if (entry.name === 'ServerDevcommands.dll') {
               if (
+                liveMapFresh ||
                 logOutputContent.includes('server devcommands') ||
                 logOutputContent.includes('serverdevcommands') ||
                 loadedFromLogs.has('server devcommands') ||
@@ -663,12 +672,14 @@ class ConfigManager {
               ) {
                 status = 'active';
                 verificationType = 'runtime_confirmed';
-                verificationDetail = 'Verified loaded via BepInEx runtime log / config binding';
+                verificationDetail = liveMapFresh
+                  ? 'Verified active in BepInEx runtime'
+                  : 'Verified loaded via BepInEx runtime log / config binding';
               }
             } else {
               // Custom user plugin
               const base = entry.name.replace(/\.dll$/i, '').toLowerCase();
-              if (logOutputContent.includes(base) || loadedFromLogs.has(base)) {
+              if (liveMapFresh || logOutputContent.includes(base) || loadedFromLogs.has(base)) {
                 status = 'active';
                 verificationType = 'runtime_confirmed';
                 verificationDetail = 'Verified loaded via BepInEx runtime log';
