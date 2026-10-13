@@ -610,10 +610,14 @@ class ConfigManager {
             description: 'User-installed BepInEx plugin in /config/bepinex/plugins'
           };
 
+          const startedAtMs = runtime.containerStatus?.startedAt ? new Date(runtime.containerStatus.startedAt).getTime() : 0;
+          const uptimeSeconds = startedAtMs > 0 ? Math.round((Date.now() - startedAtMs) / 1000) : 999;
+          const isBooting = uptimeSeconds < 75;
+
           let status = 'standby';
           let verificationType = 'file_only';
           let verificationDetail = (runtime.bepinexConfirmedEnabled || isBepInExEnabled)
-            ? 'BepInEx is active; Valheim is loading world save (~45-60s)...'
+            ? (isBooting ? 'BepInEx is active; Valheim is booting & loading world (~45-60s)...' : 'DLL present on disk; awaiting BepInEx runtime initialization')
             : 'DLL present on disk; awaiting BepInEx runtime initialization';
 
           if (!isBepInExEnabled) {
@@ -652,6 +656,12 @@ class ConfigManager {
                 status = 'standby';
                 verificationType = 'stale_heartbeat';
                 verificationDetail = `Telemetry heartbeat stale (${liveMapAgeSeconds}s ago)`;
+              } else {
+                status = 'standby';
+                verificationType = 'awaiting_init';
+                verificationDetail = isBooting
+                  ? 'Valheim server booting with BepInEx (~45-60s)...'
+                  : 'Plugin DLL deployed to /config/bepinex/plugins; awaiting in-world telemetry trigger';
               }
             } else if (entry.name === 'SpreadTheLoad.dll') {
               if (

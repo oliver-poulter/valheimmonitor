@@ -613,9 +613,10 @@ namespace HeimdallWatchtower
 
             // Query ZNet.GetPlayerList() as an authoritative coordinate source
             var playerListPositions = new System.Collections.Generic.Dictionary<string, UnityEngine.Vector3>(StringComparer.OrdinalIgnoreCase);
+            IEnumerable playerListObj = null;
             try
             {
-                var playerListObj = _znetType.GetMethod("GetPlayerList", BindingFlags.Public | BindingFlags.Instance)?.Invoke(znetInstance, null) as IEnumerable;
+                playerListObj = _znetType.GetMethod("GetPlayerList", BindingFlags.Public | BindingFlags.Instance)?.Invoke(znetInstance, null) as IEnumerable;
                 if (playerListObj != null)
                 {
                     foreach (var pi in playerListObj)

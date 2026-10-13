@@ -137,7 +137,7 @@ class DockerController {
             try {
               const srcStat = fs.statSync(srcPath);
               const destStat = fs.statSync(destPath);
-              if (srcStat.size !== destStat.size) shouldCopy = true;
+              if (srcStat.size !== destStat.size || srcStat.mtimeMs > destStat.mtimeMs) shouldCopy = true;
             } catch (_) {}
           }
           if (shouldCopy) {
