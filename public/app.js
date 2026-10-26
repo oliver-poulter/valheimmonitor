@@ -55,13 +55,31 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Global keybindings (Ctrl+K / Cmd+K for Command Palette)
+  // Global keybindings (Ctrl+K / Cmd+K for Command Palette, Escape for Palette & Fullscreen Map)
   window.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
       e.preventDefault();
       openCommandPalette();
     } else if (e.key === 'Escape') {
-      closeCommandPalette();
+      const modal = document.getElementById('commandPaletteModal');
+      if (modal && !modal.classList.contains('hidden')) {
+        closeCommandPalette();
+      } else {
+        const panel = document.getElementById('mapCanvasPanel');
+        if (panel && panel.classList.contains('fullscreen-map')) {
+          toggleMapFullscreen();
+        }
+      }
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    const panel = document.getElementById('mapCanvasPanel');
+    const canvas = document.getElementById('valheimMapCanvas');
+    if (panel && canvas && panel.classList.contains('fullscreen-map')) {
+      canvas.width = Math.max(400, window.innerWidth - 60);
+      canvas.height = Math.max(320, window.innerHeight - 140);
+      requestMapRedraw();
     }
   });
 
@@ -91,11 +109,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Refresh relative session timers every 15 seconds
+  // Refresh relative session timers & raid expiry every 15 seconds
   setInterval(() => {
     if (appState) {
       renderActiveVikings();
       renderPlayersTable();
+      updateActiveRaidAlarmBanner();
     }
   }, 15000);
 });
@@ -418,11 +437,16 @@ function renderActiveVikings() {
       const sessionDuration = formatDurationFromTimestamp(p.currentSessionStart);
       const totalHours = (effectiveTotalPlaytimeSec / 3600).toFixed(1);
       const initials = getInitials(p.name);
-      const liveTelemetry = liveMapPlayers[p.steamId];
+      const liveTelemetry =
+        liveMapPlayers[p.steamId] ||
+        Object.values(liveMapPlayers).find(
+          (lp) => lp && lp.name && p.name && lp.name.toLowerCase() === p.name.toLowerCase()
+        );
+      const hasLiveGps = Boolean(liveTelemetry && liveTelemetry.hasGps !== false);
       const hpBadge = liveTelemetry
         ? `<span class="role-badge" style="background:rgba(239,68,68,0.18);color:#fca5a5;border:1px solid rgba(248,113,113,0.4)">❤️ ${liveTelemetry.hp}/${liveTelemetry.maxHp} HP</span>`
         : '';
-      const locBadge = liveTelemetry
+      const locBadge = hasLiveGps
         ? ` • 📍 <strong class="text-frost">${escapeHtml(liveTelemetry.biome)}</strong> (${liveTelemetry.x}, ${liveTelemetry.z})`
         : '';
 
@@ -857,7 +881,11 @@ function updateActiveRaidAlarmBanner() {
 
   const recentRaid = (appState.raids || [])[0];
   const now = Date.now();
-  const isRecentRaid = recentRaid && (now - new Date(recentRaid.timestamp).getTime()) < 360000;
+  const raidDurationMs = ((recentRaid && recentRaid.durationSec) || 120) * 1000;
+  const isRecentRaid =
+    recentRaid &&
+    !recentRaid.stopped &&
+    now - new Date(recentRaid.timestamp).getTime() < raidDurationMs;
 
   if (isRecentRaid) {
     banner.classList.remove('hidden');
@@ -1437,6 +1465,7 @@ function renderActiveModsList() {
    SETTINGS & MODIFIERS & DISCORD EMBED SIMULATOR
    -------------------------------------------------------------------------- */
 let modConfigsLoadedOnce = false;
+let lastModConfigFileListKey = '';
 function populateSettingsAndModifiers() {
   if (!appState || !appState.settings) return;
   const s = appState.settings;
@@ -1472,12 +1501,19 @@ function populateSettingsAndModifiers() {
 
   const cfgSelect = document.getElementById('modConfigFileSelect');
   const files = appState.mods?.configFiles || [];
-  if (cfgSelect && files.length > 0 && !modConfigsLoadedOnce) {
-    modConfigsLoadedOnce = true;
+  const fileListKey = files.map((f) => f.filename).join('|');
+  if (cfgSelect && files.length > 0 && fileListKey !== lastModConfigFileListKey) {
+    const prevSelected = cfgSelect.value;
+    lastModConfigFileListKey = fileListKey;
     cfgSelect.innerHTML = files
       .map((f) => `<option value="${escapeAttr(f.filename)}">${escapeHtml(f.filename)}</option>`)
       .join('');
-    loadSelectedModConfig(files[0].filename);
+    if (prevSelected && files.some((f) => f.filename === prevSelected)) {
+      cfgSelect.value = prevSelected;
+    } else if (!modConfigsLoadedOnce) {
+      modConfigsLoadedOnce = true;
+      loadSelectedModConfig(files[0].filename);
+    }
   }
 }
 
@@ -2068,7 +2104,7 @@ function initMapCanvasInteraction() {
           if (Math.hypot(px - pt.x, py - pt.y) < 18) {
             hoveredMarker = {
               title: `${lm.icon || '📍'} ${escapeHtml(lm.name)}`,
-              body: `Status: ${escapeHtml(lm.status)}<br>Coordinates: (${lm.x}, ${lm.z})`
+              body: `Status: ${escapeHtml(lm.status || lm.biome || 'Landmark')}<br>Coordinates: (${lm.x}, ${lm.z})`
             };
             break;
           }
@@ -2123,8 +2159,22 @@ function focusMapOnCoords(x, z, label = '') {
 }
 
 function jumpToVikingOnMap(steamId) {
-  const lp = appState?.worldMap?.livePlayers?.[steamId];
+  const livePlayers = appState?.worldMap?.livePlayers || {};
+  let lp = livePlayers[steamId];
+  if (!lp && appState?.players) {
+    const pRec = appState.players.find((p) => p.steamId === steamId);
+    if (pRec && pRec.name) {
+      lp = Object.values(livePlayers).find(
+        (x) => x && x.name && x.name.toLowerCase() === pRec.name.toLowerCase()
+      );
+    }
+  }
   if (!lp) return;
+  if (lp.hasGps === false) {
+    switchTab('map');
+    showToast(`📡 ${lp.name} is online — awaiting live GPS coordinates from BepInEx...`);
+    return;
+  }
   focusMapOnCoords(lp.x, lp.z, lp.name);
 }
 
@@ -2345,7 +2395,7 @@ function renderLiveMapAndVitals() {
             <span class="event-icon">${lm.icon || '🦌'}</span>
             <div class="event-body">
               <div class="event-title">${escapeHtml(lm.name)}</div>
-              <div class="event-detail">${escapeHtml(lm.status)} • (${lm.x}, ${lm.z})</div>
+              <div class="event-detail">${escapeHtml(lm.status || lm.biome || 'Landmark')} • (${lm.x}, ${lm.z})</div>
             </div>
             <button class="btn btn-xs btn-glass">Pan →</button>
           </div>

@@ -547,6 +547,7 @@ class ConfigManager {
     ].join('\n') + '\n';
 
     fs.writeFileSync(fullPath, output, 'utf8');
+    this.applyOwnership(fullPath);
     this.saveState();
     return this.getAccessLists();
   }
@@ -880,7 +881,10 @@ class ConfigManager {
   }
 
   readModConfigFile(filename) {
-    const safeName = path.basename(filename);
+    const safeName = path.basename(String(filename || ''));
+    if (!safeName || !/\.(cfg|txt|json|yml)$/i.test(safeName)) {
+      throw new Error('Invalid config filename');
+    }
     const fullPath = path.join(this.bepinexConfigDir, safeName);
     if (!fs.existsSync(fullPath)) throw new Error('Config file not found');
     return {
@@ -890,9 +894,13 @@ class ConfigManager {
   }
 
   writeModConfigFile(filename, content) {
-    const safeName = path.basename(filename);
+    const safeName = path.basename(String(filename || ''));
+    if (!safeName || !/\.(cfg|txt|json|yml)$/i.test(safeName)) {
+      throw new Error('Invalid config filename');
+    }
     const fullPath = path.join(this.bepinexConfigDir, safeName);
     fs.writeFileSync(fullPath, String(content), 'utf8');
+    this.applyOwnership(fullPath);
     return { filename: safeName, savedAt: new Date().toISOString() };
   }
 }

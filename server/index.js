@@ -27,12 +27,16 @@ function broadcastSSE(type, payload) {
 
 const configManager = new ConfigManager();
 const mapEngine = new ValheimMapEngine(configManager);
-const logParser = new ValheimLogParser(configManager, ({ logEntry, stateChanged }) => {
-  broadcastSSE('log', logEntry);
-  if (stateChanged) {
-    broadcastSSE('state_updated', { timestamp: new Date().toISOString() });
-  }
-});
+const logParser = new ValheimLogParser(
+  configManager,
+  ({ logEntry, stateChanged }) => {
+    broadcastSSE('log', logEntry);
+    if (stateChanged) {
+      broadcastSSE('state_updated', { timestamp: new Date().toISOString() });
+    }
+  },
+  mapEngine
+);
 const dockerController = new DockerController(configManager, logParser);
 
 function buildOverviewPayload() {
@@ -303,7 +307,6 @@ app.post('/api/simulate/event', (req, res) => {
       logParser.processLine(`${nowStr}: Got character ZDOID from ${playerName} : 418999102:1`);
     } else if (eventType === 'death') {
       logParser.processLine(`${nowStr}: Got character ZDOID from ${playerName} : 0:0`);
-      mapEngine.recordPlayerDeathTombstone(playerName, steamId);
     } else if (eventType === 'leave') {
       logParser.processLine(`${nowStr}: Closing socket ${steamId}`);
     } else if (eventType === 'raid') {

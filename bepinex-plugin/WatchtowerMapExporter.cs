@@ -123,7 +123,7 @@ namespace HeimdallWatchtower
                 sb.AppendFormat("  \"timestamp\": \"{0}\",\n", nowIso);
                 sb.Append("  \"players\": [],\n");
                 sb.Append("  \"landmarks\": [\n");
-                sb.Append("    { \"id\": \"lm-0\", \"type\": \"spawn\", \"name\": \"Sacrificial Stones\", \"icon\": \"🏛️\", \"biome\": \"Meadows\", \"x\": 0, \"z\": 0 }\n");
+                sb.Append("    { \"id\": \"lm-0\", \"type\": \"spawn\", \"name\": \"Sacrificial Stones\", \"icon\": \"🏛️\", \"biome\": \"Meadows\", \"status\": \"Spawn Altar\", \"x\": 0, \"z\": 0 }\n");
                 sb.Append("  ]\n}\n");
                 AtomicWriteText(OutputPath, sb.ToString());
             }
@@ -531,11 +531,12 @@ namespace HeimdallWatchtower
 
                         if (label == null) continue;
 
+                        string lmStatus = ltype == "spawn" ? "Spawn Altar" : (ltype == "trader" ? "Trader Camp" : "Forsaken Altar");
                         if (!first) lsb.Append(",\n");
                         first = false;
                         lsb.Append("    { ");
-                        lsb.AppendFormat(CultureInfo.InvariantCulture, "\"id\": \"lm-{0}\", \"type\": \"{1}\", \"name\": \"{2}\", \"icon\": \"{3}\", \"biome\": \"{4}\", \"x\": {5:F0}, \"z\": {6:F0}",
-                            count++, ltype, EscapeJson(label), EscapeJson(icon), EscapeJson(biome), x, z);
+                        lsb.AppendFormat(CultureInfo.InvariantCulture, "\"id\": \"lm-{0}\", \"type\": \"{1}\", \"name\": \"{2}\", \"icon\": \"{3}\", \"biome\": \"{4}\", \"status\": \"{5}\", \"x\": {6:F0}, \"z\": {7:F0}",
+                            count++, ltype, EscapeJson(label), EscapeJson(icon), EscapeJson(biome), EscapeJson(lmStatus), x, z);
                         lsb.Append(" }");
                         if (count >= 50) break;
                     }
@@ -553,7 +554,7 @@ namespace HeimdallWatchtower
             }
             else
             {
-                sb.Append("    { \"id\": \"lm-0\", \"type\": \"spawn\", \"name\": \"Sacrificial Stones\", \"icon\": \"🏛️\", \"biome\": \"Meadows\", \"x\": 0, \"z\": 0 }");
+                sb.Append("    { \"id\": \"lm-0\", \"type\": \"spawn\", \"name\": \"Sacrificial Stones\", \"icon\": \"🏛️\", \"biome\": \"Meadows\", \"status\": \"Spawn Altar\", \"x\": 0, \"z\": 0 }");
             }
         }
 

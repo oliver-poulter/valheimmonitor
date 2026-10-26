@@ -2,9 +2,10 @@ const { RAID_LORE_MAP } = require('./configManager');
 const { sendDiscordNotification } = require('./discordNotifier');
 
 class ValheimLogParser {
-  constructor(configManager, onUpdateCallback = () => {}) {
+  constructor(configManager, onUpdateCallback = () => {}, mapEngine = null) {
     this.configManager = configManager;
     this.onUpdate = onUpdateCallback;
+    this.mapEngine = mapEngine;
     this.pendingSteamIds = [];
     this.recentLogs = [];
     this.maxLogLines = 400;
@@ -26,7 +27,7 @@ class ValheimLogParser {
 
     // Extract timestamp if present (MM/DD/YYYY HH:MM:SS:)
     let timestamp = new Date().toISOString();
-    const tsMatch = cleanLine.match(/^(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}:\d{2}):\s*(.*)$/);
+    const tsMatch = cleanLine.match(/^(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}:\d{2})\s*:\s*(.*)$/);
     let body = cleanLine;
     if (tsMatch) {
       const parsedDate = new Date(tsMatch[1]);
@@ -118,6 +119,9 @@ class ValheimLogParser {
       if (zdoId === '0:0') {
         // Player died!
         player.deathsCount = (player.deathsCount || 0) + 1;
+        if (this.mapEngine) {
+          this.mapEngine.recordPlayerDeathTombstone(playerName, player.steamId);
+        }
         this.addEvent({
           type: 'death',
           timestamp,
@@ -297,6 +301,14 @@ class ValheimLogParser {
       stateChanged = true;
     }
 
+    // 4b. Random Event Stopped
+    if (/Random event stopped|Stopping random event/i.test(body)) {
+      if (this.state.raids && this.state.raids.length > 0) {
+        this.state.raids[0].stopped = true;
+        stateChanged = true;
+      }
+    }
+
     // 5. World Saved duration & ZDO count
     const zdoCountMatch = body.match(/Saved (\d+) ZDOs/i);
     if (zdoCountMatch) {
@@ -447,6 +459,9 @@ class ValheimLogParser {
         return true;
       }
       const sessionSeconds = this.configManager.finalizePlayerSession(target, timestamp);
+      if (this.mapEngine) {
+        this.mapEngine.removeOfflinePlayer(target.steamId, target.name);
+      }
       this.addEvent({
         type: 'leave',
         timestamp,

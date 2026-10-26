@@ -73,7 +73,10 @@ class ValheimMapEngine {
           heightsB64: b64Heights
         };
         if (Array.isArray(raw.landmarks) && raw.landmarks.length > 0) {
-          this.mapState.landmarks = raw.landmarks;
+          this.mapState.landmarks = raw.landmarks.map((lm) => ({
+            ...lm,
+            status: lm.status || (lm.type === 'spawn' ? 'Spawn Altar' : lm.type === 'trader' ? 'Trader Camp' : 'Forsaken Altar')
+          }));
         }
       }
     } catch (_) {}
@@ -209,7 +212,13 @@ class ValheimMapEngine {
         // Fallback: If BepInEx is still loading/booting world or reports 0 players, preserve/show known online players from server logs
         const knownPlayers = this.configManager.state.players || {};
         for (const [steamId, p] of Object.entries(knownPlayers)) {
-          if (p.online && !this.mapState.livePlayers[steamId]) {
+          if (!p.online) continue;
+          const alreadyTracked =
+            Boolean(this.mapState.livePlayers[steamId]) ||
+            Object.values(this.mapState.livePlayers).some(
+              (lp) => lp.name && p.name && lp.name.toLowerCase() === p.name.toLowerCase()
+            );
+          if (!alreadyTracked) {
             this.mapState.livePlayers[steamId] = {
               steamId,
               name: p.name,
@@ -332,9 +341,18 @@ class ValheimMapEngine {
       const activeIds = new Set(payload.players.map((p) => String(p.steamId || '').trim()).filter(Boolean));
       const activeNames = new Set(payload.players.map((p) => String(p.name || '').toLowerCase().trim()).filter(Boolean));
 
+      const knownPlayers = this.configManager.state.players || {};
       for (const p of payload.players) {
-        const key = p.steamId || p.name;
-        const prev = this.mapState.livePlayers[key];
+        let key = p.steamId || p.name;
+        if (p.name && !knownPlayers[key]) {
+          const matchedEntry = Object.entries(knownPlayers).find(
+            ([, rec]) => rec && rec.name && rec.name.toLowerCase() === String(p.name).toLowerCase()
+          );
+          if (matchedEntry) {
+            key = matchedEntry[0];
+          }
+        }
+        const prev = this.mapState.livePlayers[key] || (p.steamId && this.mapState.livePlayers[p.steamId]);
         const trail = prev && Array.isArray(prev.trail) ? [...prev.trail] : [];
         trail.push({ x: Math.round(p.x || 0), z: Math.round(p.z || 0) });
         if (trail.length > 12) trail.shift();
@@ -408,7 +426,24 @@ class ValheimMapEngine {
     if (Array.isArray(payload.portals)) this.mapState.portals = payload.portals;
     if (Array.isArray(payload.tombstones)) this.mapState.tombstones = payload.tombstones;
     if (Array.isArray(payload.landmarks) && payload.landmarks.length > 0) {
-      this.mapState.landmarks = payload.landmarks;
+      this.mapState.landmarks = payload.landmarks.map((lm) => ({
+        ...lm,
+        status: lm.status || (lm.type === 'spawn' ? 'Spawn Altar' : lm.type === 'trader' ? 'Trader Camp' : 'Forsaken Altar')
+      }));
+    }
+  }
+
+  removeOfflinePlayer(steamId, playerName) {
+    if (steamId && this.mapState.livePlayers[steamId]) {
+      delete this.mapState.livePlayers[steamId];
+    }
+    if (playerName) {
+      const lower = String(playerName).toLowerCase();
+      for (const [k, lp] of Object.entries(this.mapState.livePlayers)) {
+        if (lp && lp.name && lp.name.toLowerCase() === lower) {
+          delete this.mapState.livePlayers[k];
+        }
+      }
     }
   }
 
