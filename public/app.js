@@ -804,6 +804,7 @@ function exportVikingRosterCsv() {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+  URL.revokeObjectURL(url);
   showToast('📥 Exported Viking roster to CSV');
   playSfx('copy');
 }
@@ -819,6 +820,7 @@ function exportVikingRosterJson() {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+  URL.revokeObjectURL(url);
   showToast('📥 Exported Viking roster to JSON');
   playSfx('copy');
 }
@@ -1111,6 +1113,7 @@ function downloadLogStream() {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+  URL.revokeObjectURL(url);
   showToast('📥 Downloaded server log stream');
   playSfx('copy');
 }
@@ -2520,8 +2523,9 @@ function decodeBase64ToUint8(b64) {
 
 function ensureValheimTerrainCache(wm) {
   const tg = wm.terrainGrid;
+  const showBorders = document.getElementById('toggleBiomeBorders')?.checked !== false;
   const gridSig = tg ? `${tg.resolution || tg.gridSize || ''}-${(tg.heightsB64 || tg.heightsBase64 || '').length}` : 'nogrid';
-  const seedKey = `${wm.seedNumeric || wm.seedName || 'default'}-${TERRAIN_RES}-${gridSig}`;
+  const seedKey = `${wm.seedNumeric || wm.seedName || 'default'}-${TERRAIN_RES}-${gridSig}-${showBorders ? 'b1' : 'b0'}`;
   if (cachedTerrainCanvas && cachedTerrainSeed === seedKey) {
     return cachedTerrainCanvas;
   }
@@ -2822,7 +2826,6 @@ function ensureValheimTerrainCache(wm) {
       g *= hillshade;
       bl *= hillshade;
 
-      const showBorders = document.getElementById('toggleBiomeBorders')?.checked !== false;
       if (showBorders) {
         const bL = px > 0 ? biomes[idx - 1] : b;
         const bR = px < TERRAIN_RES - 1 ? biomes[idx + 1] : b;
