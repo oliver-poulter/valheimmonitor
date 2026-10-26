@@ -210,15 +210,24 @@ class ValheimMapEngine {
         this.ingestExternalTelemetry(externalData, statusLabel);
 
         // Fallback: If BepInEx is still loading/booting world or reports 0 players, preserve/show known online players from server logs
+        const fallbackActivity =
+          pStatus === 'configuring_and_restarting_server'
+            ? 'Restarting server with BepInEx (~45-60s)...'
+            : pStatus === 'loading_world_save' ||
+              pStatus === 'plugin_loaded_booting_world' ||
+              pStatus === 'waiting_for_assembly_valheim'
+            ? 'Valheim server loading world save...'
+            : 'Syncing ZDO coordinates...';
+
         const knownPlayers = this.configManager.state.players || {};
         for (const [steamId, p] of Object.entries(knownPlayers)) {
           if (!p.online) continue;
-          const alreadyTracked =
-            Boolean(this.mapState.livePlayers[steamId]) ||
-            Object.values(this.mapState.livePlayers).some(
+          const existing =
+            this.mapState.livePlayers[steamId] ||
+            Object.values(this.mapState.livePlayers).find(
               (lp) => lp.name && p.name && lp.name.toLowerCase() === p.name.toLowerCase()
             );
-          if (!alreadyTracked) {
+          if (!existing) {
             this.mapState.livePlayers[steamId] = {
               steamId,
               name: p.name,
@@ -232,10 +241,12 @@ class ValheimMapEngine {
               stamina: 50,
               maxStamina: 50,
               biome: 'Awaiting GPS Signal',
-              activity: pStatus === 'loading_world_save' ? 'Valheim server loading world save...' : 'Online',
+              activity: fallbackActivity,
               foods: [],
               trail: []
             };
+          } else if (existing.hasGps === false) {
+            existing.activity = fallbackActivity;
           }
         }
         return;
@@ -247,27 +258,35 @@ class ValheimMapEngine {
       this.mapState.pluginStatus = 'not_configured';
       const knownPlayers = this.configManager.state.players || {};
       const nextLive = {};
+      const noFileActivity =
+        process.env.AUTO_CONFIGURE_SERVER !== 'false'
+          ? 'Auto-configuring BepInEx Live GPS Bridge...'
+          : 'Click Auto-Configure Server to enable Live GPS';
 
       for (const [steamId, p] of Object.entries(knownPlayers)) {
         if (p.online) {
           const prev = this.mapState.livePlayers[steamId];
-          nextLive[steamId] = prev || {
-            steamId,
-            name: p.name,
-            x: 0,
-            y: 20,
-            z: 0,
-            hasGps: false,
-            heading: 0,
-            hp: 25,
-            maxHp: 25,
-            stamina: 50,
-            maxStamina: 50,
-            biome: 'Awaiting GPS Signal',
-            activity: 'Online (Add BEPINEX=true to docker-compose.yml)',
-            foods: [],
-            trail: []
-          };
+          if (prev && prev.hasGps) {
+            nextLive[steamId] = prev;
+          } else {
+            nextLive[steamId] = {
+              steamId,
+              name: p.name,
+              x: 0,
+              y: 20,
+              z: 0,
+              hasGps: false,
+              heading: 0,
+              hp: 25,
+              maxHp: 25,
+              stamina: 50,
+              maxStamina: 50,
+              biome: 'Awaiting GPS Signal',
+              activity: noFileActivity,
+              foods: [],
+              trail: []
+            };
+          }
         }
       }
       this.mapState.livePlayers = nextLive;
@@ -358,8 +377,9 @@ class ValheimMapEngine {
         if (trail.length > 12) trail.shift();
 
         const px = Math.round(p.x || 0);
+        const py = Math.round(p.y || 0);
         const pz = Math.round(p.z || 0);
-        const hasGps = p.hasGps !== false && (px !== 0 || pz !== 0);
+        const hasGps = p.hasGps !== false && (px !== 0 || pz !== 0 || py > 1);
         const pDist = Math.hypot(px, pz);
         let resolvedBiome = p.biome || this.estimateBiome(px, pz);
         if (hasGps) {

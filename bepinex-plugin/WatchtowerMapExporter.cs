@@ -15,18 +15,32 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using BepInEx;
-using UnityEngine;
 
 namespace HeimdallWatchtower
 {
-    [BepInPlugin("com.watchtower.valheim.mapexporter", "Heimdall Watchtower Map Exporter", "1.5.0")]
+    [BepInPlugin("com.watchtower.valheim.mapexporter", "Heimdall Watchtower Map Exporter", "1.6.0")]
     public class WatchtowerMapExporter : BaseUnityPlugin
     {
-        private float _timer;
         private const float ExportIntervalSeconds = 2.0f;
+        private const long ExportIntervalTicks = (long)(ExportIntervalSeconds * TimeSpan.TicksPerSecond);
         private const string OutputPath = "/config/watchtower/live_map.json";
         private const string TerrainOutputPath = "/config/watchtower/world_terrain.json";
+
+        // Static timer + instance root so export continues even if Unity destroys BepInEx_Manager on scene load
+        private static Timer _backgroundTimer;
+        private static WatchtowerMapExporter _activeInstance;
+        private int _isExporting;
+        private long _lastExportUtcTicks;
+        private bool _initialized;
+
+        private struct Vec3
+        {
+            public float X;
+            public float Y;
+            public float Z;
+        }
 
         private Type _znetType;
         private Type _zdoManType;
@@ -72,15 +86,29 @@ namespace HeimdallWatchtower
         private static object GetFieldVal(Type t, object target, string name, BindingFlags flags)
         {
             if (t == null) return null;
-            FieldInfo f = t.GetField(name, flags);
-            return f != null ? f.GetValue(target) : null;
+            try
+            {
+                FieldInfo f = t.GetField(name, flags);
+                return f != null ? f.GetValue(target) : null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static object GetPropVal(Type t, object target, string name, BindingFlags flags)
         {
             if (t == null) return null;
-            PropertyInfo p = t.GetProperty(name, flags);
-            return (p != null && p.GetIndexParameters().Length == 0) ? p.GetValue(target, null) : null;
+            try
+            {
+                PropertyInfo p = t.GetProperty(name, flags);
+                return (p != null && p.GetIndexParameters().Length == 0) ? p.GetValue(target, null) : null;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static object GetMemberVal(Type t, object target, string name, BindingFlags flags)
@@ -92,21 +120,54 @@ namespace HeimdallWatchtower
         private static object InvokeMethod(Type t, object target, string name, BindingFlags flags)
         {
             if (t == null) return null;
-            MethodInfo m = t.GetMethod(name, flags);
-            return m != null ? m.Invoke(target, null) : null;
+            try
+            {
+                MethodInfo m = t.GetMethod(name, flags, null, Type.EmptyTypes, null) ?? t.GetMethod(name, flags);
+                return (m != null && m.GetParameters().Length == 0) ? m.Invoke(target, null) : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public WatchtowerMapExporter()
+        {
+            EnsureInitialized();
         }
 
         private void Awake()
         {
+            EnsureInitialized();
+        }
+
+        private void EnsureInitialized()
+        {
+            if (_initialized) return;
+            _initialized = true;
+            _activeInstance = this;
             try
             {
                 Directory.CreateDirectory("/config/watchtower");
                 WriteBootstrapStatus("plugin_loaded_booting_world");
-                Logger.LogInfo("[Heimdall Watchtower] Live Map, Terrain & Health ZDO Exporter v1.5.0 initialized.");
+                if (_backgroundTimer == null)
+                {
+                    _backgroundTimer = new Timer(OnBackgroundTimerTick, null, 2000, 2000);
+                }
+                Logger.LogInfo("[Heimdall Watchtower] Live Map, Terrain & Health ZDO Exporter v1.6.0 initialized.");
             }
             catch (Exception ex)
             {
-                Logger.LogWarning("[Heimdall Watchtower] Init warning: " + ex.Message);
+                try { Logger.LogWarning("[Heimdall Watchtower] Init warning: " + ex.Message); } catch { }
+            }
+        }
+
+        private static void OnBackgroundTimerTick(object state)
+        {
+            var inst = _activeInstance;
+            if (inst != null)
+            {
+                inst.RunExportTick(false);
             }
         }
 
@@ -117,7 +178,7 @@ namespace HeimdallWatchtower
                 var sb = new StringBuilder(512);
                 sb.Append("{\n");
                 sb.AppendFormat("  \"pluginStatus\": \"{0}\",\n", EscapeJson(status));
-                sb.Append("  \"pluginVersion\": \"1.5.0\",\n");
+                sb.Append("  \"pluginVersion\": \"1.6.0\",\n");
                 string nowIso = DateTime.UtcNow.ToString("o");
                 sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", nowIso);
                 sb.AppendFormat("  \"timestamp\": \"{0}\",\n", nowIso);
@@ -135,29 +196,39 @@ namespace HeimdallWatchtower
 
         private void Update()
         {
-            if (!_terrainExported)
-            {
-                try
-                {
-                    StepTerrainExport();
-                }
-                catch
-                {
-                    // Ignore transient reflection errors while world is still initializing
-                }
-            }
+            RunExportTick(true);
+        }
 
-            _timer += Time.deltaTime;
-            if (_timer < ExportIntervalSeconds) return;
-            _timer = 0f;
-
+        private void RunExportTick(bool isMainThread)
+        {
+            if (Interlocked.CompareExchange(ref _isExporting, 1, 0) != 0) return;
             try
             {
+                if (!_terrainExported)
+                {
+                    try
+                    {
+                        StepTerrainExport(isMainThread ? 8 : 25);
+                    }
+                    catch
+                    {
+                        // Ignore transient reflection errors while world is still initializing
+                    }
+                }
+
+                long nowTicks = DateTime.UtcNow.Ticks;
+                if (nowTicks - _lastExportUtcTicks < ExportIntervalTicks) return;
+                _lastExportUtcTicks = nowTicks;
+
                 ExportWorldAndPlayers();
             }
             catch (Exception ex)
             {
-                Logger.LogError("[Heimdall Watchtower] ExportWorldAndPlayers error: " + ex.Message);
+                try { Logger.LogError("[Heimdall Watchtower] ExportWorldAndPlayers error: " + ex.Message); } catch { }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isExporting, 0);
             }
         }
 
@@ -182,7 +253,7 @@ namespace HeimdallWatchtower
             if (t == null) return null;
             const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.FlattenHierarchy;
 
-            // 1. Check known singleton field names first (fastest & side-effect free)
+            // 1. Check known singleton field names first (fastest & thread-safe)
             foreach (var fieldName in new[] { "m_instance", "s_instance", "instance", "_instance", "Instance" })
             {
                 try
@@ -212,21 +283,6 @@ namespace HeimdallWatchtower
                     if (t.IsAssignableFrom(field.FieldType))
                     {
                         var val = field.GetValue(null);
-                        if (val != null) return val;
-                    }
-                }
-            }
-            catch { }
-
-            // 4. Unity Component search fallback ONLY if t derives from UnityEngine.Object
-            try
-            {
-                if (typeof(UnityEngine.Object).IsAssignableFrom(t))
-                {
-                    var findMethod = typeof(UnityEngine.Object).GetMethod("FindObjectOfType", new[] { typeof(Type) });
-                    if (findMethod != null)
-                    {
-                        var val = findMethod.Invoke(null, new object[] { t });
                         if (val != null) return val;
                     }
                 }
@@ -271,7 +327,7 @@ namespace HeimdallWatchtower
             return null;
         }
 
-        private void StepTerrainExport()
+        private void StepTerrainExport(int rowsToProcess = 8)
         {
             ResolveTypes();
             if (_worldGenType == null || _znetType == null) return;
@@ -366,8 +422,7 @@ namespace HeimdallWatchtower
                 ? new object[] { 0f, 0f, defaultThirdArg }
                 : new object[] { 0f, 0f };
 
-            // Process 8 rows per Update frame (~1,600 samples/frame) so server tick is never delayed
-            int rowsToProcess = 8;
+            // Process rowsToProcess rows per tick so server tick is never delayed
             while (rowsToProcess > 0 && _terrainRow < GridSize)
             {
                 float wz = WorldRadius - ((_terrainRow + 0.5f) / GridSize) * (WorldRadius * 2f);
@@ -490,7 +545,6 @@ namespace HeimdallWatchtower
                             var lType = locObj.GetType();
                             prefabName = GetMemberVal(lType, locObj, "m_prefabName", InstFlags) as string
                                       ?? GetFieldVal(lType, locObj, "m_name", InstFlags) as string
-                                      ?? GetPropVal(lType, locObj, "name", InstFlags) as string
                                       ?? "";
 
                             if (string.IsNullOrEmpty(prefabName))
@@ -498,7 +552,9 @@ namespace HeimdallWatchtower
                                 var prefabObj = GetMemberVal(lType, locObj, "m_prefab", InstFlags);
                                 if (prefabObj != null)
                                 {
-                                    prefabName = GetPropVal(prefabObj.GetType(), prefabObj, "name", InstFlags) as string ?? "";
+                                    prefabName = GetFieldVal(prefabObj.GetType(), prefabObj, "m_name", InstFlags) as string
+                                              ?? GetPropVal(prefabObj.GetType(), prefabObj, "Name", InstFlags) as string
+                                              ?? "";
                                 }
                             }
                         }
@@ -609,32 +665,57 @@ namespace HeimdallWatchtower
         {
             x = 0f; y = 0f; z = 0f;
             if (vecObj == null) return false;
-            if (vecObj is Vector3)
+            try
             {
-                Vector3 directVec = (Vector3)vecObj;
-                x = directVec.x;
-                y = directVec.y;
-                z = directVec.z;
-                return true;
-            }
+                var t = vecObj.GetType();
+                if (_cachedVecType != t)
+                {
+                    _vecXField = t.GetField("x", InstFlags);
+                    _vecYField = t.GetField("y", InstFlags);
+                    _vecZField = t.GetField("z", InstFlags);
+                    _cachedVecType = t;
+                }
 
-            var t = vecObj.GetType();
-            if (_cachedVecType != t)
-            {
-                _vecXField = t.GetField("x", InstFlags);
-                _vecYField = t.GetField("y", InstFlags);
-                _vecZField = t.GetField("z", InstFlags);
-                _cachedVecType = t;
+                if (_vecXField != null && _vecYField != null && _vecZField != null)
+                {
+                    x = Convert.ToSingle(_vecXField.GetValue(vecObj));
+                    y = Convert.ToSingle(_vecYField.GetValue(vecObj));
+                    z = Convert.ToSingle(_vecZField.GetValue(vecObj));
+                    return true;
+                }
             }
-
-            if (_vecXField != null && _vecYField != null && _vecZField != null)
-            {
-                x = Convert.ToSingle(_vecXField.GetValue(vecObj));
-                y = Convert.ToSingle(_vecYField.GetValue(vecObj));
-                z = Convert.ToSingle(_vecZField.GetValue(vecObj));
-                return true;
-            }
+            catch { }
             return false;
+        }
+
+        private static List<object> SnapshotEnumerable(IEnumerable source)
+        {
+            var list = new List<object>();
+            if (source == null) return list;
+            try
+            {
+                var ilist = source as IList;
+                if (ilist != null)
+                {
+                    int cnt = ilist.Count;
+                    for (int i = 0; i < cnt; i++)
+                    {
+                        try
+                        {
+                            var item = ilist[i];
+                            if (item != null) list.Add(item);
+                        }
+                        catch { break; }
+                    }
+                    return list;
+                }
+                foreach (var item in source)
+                {
+                    if (item != null) list.Add(item);
+                }
+            }
+            catch { }
+            return list;
         }
 
         private static void EnsureZdoReflectionCached(Type zdoType)
@@ -691,30 +772,31 @@ namespace HeimdallWatchtower
             string worldName = InvokeMethod(_znetType, znetInstance, "GetWorldName", InstFlags) as string;
             if (string.IsNullOrEmpty(worldName)) worldName = "Dedicated";
 
-            var peersObj = InvokeMethod(_znetType, znetInstance, "GetPeers", InstFlags) as IEnumerable
-                        ?? GetFieldVal(_znetType, znetInstance, "m_peers", InstFlags) as IEnumerable;
+            var peersObj = GetFieldVal(_znetType, znetInstance, "m_peers", InstFlags) as IEnumerable
+                        ?? InvokeMethod(_znetType, znetInstance, "GetPeers", InstFlags) as IEnumerable;
+            var peersSnapshot = SnapshotEnumerable(peersObj);
 
-            // Query ZNet.GetPlayerList() as an authoritative coordinate source
-            var playerListPositions = new Dictionary<string, Vector3>(StringComparer.OrdinalIgnoreCase);
-            IEnumerable playerListObj = null;
+            // Query ZNet.m_players / ZNet.GetPlayerList() as an authoritative coordinate source
+            var playerListPositions = new Dictionary<string, Vec3>(StringComparer.OrdinalIgnoreCase);
+            List<object> playerListSnapshot = null;
             try
             {
-                playerListObj = InvokeMethod(_znetType, znetInstance, "GetPlayerList", BindingFlags.Public | BindingFlags.Instance) as IEnumerable;
-                if (playerListObj != null)
+                var playerListObj = GetFieldVal(_znetType, znetInstance, "m_players", InstFlags) as IEnumerable
+                                 ?? InvokeMethod(_znetType, znetInstance, "GetPlayerList", BindingFlags.Public | BindingFlags.Instance) as IEnumerable;
+                playerListSnapshot = SnapshotEnumerable(playerListObj);
+                for (int i = 0; i < playerListSnapshot.Count; i++)
                 {
-                    foreach (var pi in playerListObj)
+                    var pi = playerListSnapshot[i];
+                    if (pi == null) continue;
+                    var piType = pi.GetType();
+                    string piName = GetFieldVal(piType, pi, "m_name", InstFlags) as string;
+                    object piPosObj = GetFieldVal(piType, pi, "m_position", InstFlags);
+                    float px, py, pz;
+                    if (!string.IsNullOrEmpty(piName) && TryExtractVector3(piPosObj, out px, out py, out pz))
                     {
-                        if (pi == null) continue;
-                        var piType = pi.GetType();
-                        string piName = GetFieldVal(piType, pi, "m_name", InstFlags) as string;
-                        object piPosObj = GetFieldVal(piType, pi, "m_position", InstFlags);
-                        float px, py, pz;
-                        if (!string.IsNullOrEmpty(piName) && TryExtractVector3(piPosObj, out px, out py, out pz))
+                        if (px != 0f || pz != 0f || py > 1f)
                         {
-                            if (px != 0f || pz != 0f)
-                            {
-                                playerListPositions[piName] = new Vector3 { x = px, y = py, z = pz };
-                            }
+                            playerListPositions[piName] = new Vec3 { X = px, Y = py, Z = pz };
                         }
                     }
                 }
@@ -741,7 +823,7 @@ namespace HeimdallWatchtower
             var sb = new StringBuilder(4096);
             sb.Append("{\n");
             sb.Append("  \"pluginStatus\": \"active\",\n");
-            sb.Append("  \"pluginVersion\": \"1.5.0\",\n");
+            sb.Append("  \"pluginVersion\": \"1.6.0\",\n");
             sb.AppendFormat("  \"worldName\": \"{0}\",\n", EscapeJson(worldName));
             string nowIso = DateTime.UtcNow.ToString("o");
             sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", nowIso);
@@ -750,226 +832,227 @@ namespace HeimdallWatchtower
 
             bool first = true;
             var processedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (peersObj != null)
+            for (int pIdx = 0; pIdx < peersSnapshot.Count; pIdx++)
             {
-                foreach (var peer in peersObj)
+                var peer = peersSnapshot[pIdx];
+                if (peer == null) continue;
+                var peerType = peer.GetType();
+
+                string playerName = GetFieldVal(peerType, peer, "m_playerName", InstFlags) as string;
+                if (string.IsNullOrEmpty(playerName)) playerName = "Viking";
+
+                object refPosObj = GetFieldVal(peerType, peer, "m_refPos", InstFlags)
+                                ?? InvokeMethod(peerType, peer, "GetRefPos", BindingFlags.Public | BindingFlags.Instance);
+                object charIdObj = GetFieldVal(peerType, peer, "m_characterID", InstFlags);
+
+                float x = 0f, y = 0f, z = 0f;
+                float rx, ry, rz;
+                if (TryExtractVector3(refPosObj, out rx, out ry, out rz) && (rx != 0f || rz != 0f || ry > 1f))
                 {
-                    if (peer == null) continue;
-                    var peerType = peer.GetType();
-
-                    string playerName = GetFieldVal(peerType, peer, "m_playerName", InstFlags) as string;
-                    if (string.IsNullOrEmpty(playerName)) playerName = "Viking";
-
-                    object refPosObj = InvokeMethod(peerType, peer, "GetRefPos", BindingFlags.Public | BindingFlags.Instance)
-                                    ?? GetFieldVal(peerType, peer, "m_refPos", InstFlags);
-                    object charIdObj = GetFieldVal(peerType, peer, "m_characterID", InstFlags);
-
-                    float x = 0f, y = 0f, z = 0f;
-                    float rx, ry, rz;
-                    if (TryExtractVector3(refPosObj, out rx, out ry, out rz) && (rx != 0f || rz != 0f))
-                    {
-                        x = rx; y = ry; z = rz;
-                    }
-
-                    string steamId = "";
-                    object socketObj = GetFieldVal(peerType, peer, "m_socket", InstFlags);
-                    if (socketObj != null)
-                    {
-                        steamId = InvokeMethod(socketObj.GetType(), socketObj, "GetHostName", InstFlags) as string ?? "";
-                    }
-                    if (string.IsNullOrEmpty(steamId))
-                    {
-                        try
-                        {
-                            object uidObj = GetFieldVal(peerType, peer, "m_uid", InstFlags);
-                            if (uidObj != null)
-                            {
-                                long uid = Convert.ToInt64(uidObj);
-                                if (uid > 0) steamId = uid.ToString();
-                            }
-                        }
-                        catch { }
-                    }
-                    string stateKey = !string.IsNullOrEmpty(steamId) ? steamId : playerName;
-
-                    float rawHp = -1f;
-                    float rawMaxHp = -1f;
-                    float rawStamina = -1f;
-                    float rawMaxStamina = -1f;
-                    float zdoNoise = 0f;
-
-                    if (charIdObj != null && _getZdoMethod != null && zdoManInstance != null)
-                    {
-                        try
-                        {
-                            object zdo = _getZdoMethod.Invoke(zdoManInstance, new[] { charIdObj });
-                            if (zdo != null)
-                            {
-                                EnsureZdoReflectionCached(zdo.GetType());
-                                object zdoPos = _zdoGetPosMethod != null ? _zdoGetPosMethod.Invoke(zdo, null) : null;
-                                if (zdoPos == null && _zdoPosField != null) zdoPos = _zdoPosField.GetValue(zdo);
-
-                                float zx, zy, zz;
-                                if (TryExtractVector3(zdoPos, out zx, out zy, out zz) && (zx != 0f || zz != 0f))
-                                {
-                                    x = zx; y = zy; z = zz;
-                                }
-
-                                rawHp = ReadZdoFloat(zdo, HashHealth, "health", -1f);
-                                rawMaxHp = ReadZdoFloat(zdo, HashMaxHealth, "max_health", -1f);
-                                rawStamina = ReadZdoFloat(zdo, HashStamina, "stamina", -1f);
-                                rawMaxStamina = ReadZdoFloat(zdo, HashMaxStamina, "max_stamina", -1f);
-                                zdoNoise = ReadZdoFloat(zdo, HashNoise, "noise", 0f);
-                            }
-                        }
-                        catch
-                        {
-                            // Ignore transient ZDO error
-                        }
-                    }
-
-                    // Fallback to GetPlayerList if peer position is (0, 0)
-                    Vector3 pPos;
-                    if (x == 0f && z == 0f && playerListPositions.TryGetValue(playerName, out pPos))
-                    {
-                        x = pPos.x; y = pPos.y; z = pPos.z;
-                    }
-
-                    // Resolve real Health & MaxHealth (Valheim base unfed health is 25 HP)
-                    float maxHp = rawMaxHp > 0f ? rawMaxHp : (rawHp > 25f ? rawHp : 25f);
-                    float hp = rawHp > 0f ? rawHp : maxHp;
-                    if (hp > maxHp) maxHp = hp;
-
-                    // Resolve or compute real-time Stamina & MaxStamina from live ZDO movement & action noise
-                    PeerVitalState pState;
-                    if (!_vitalStates.TryGetValue(stateKey, out pState))
-                    {
-                        if (_vitalStates.Count > 64) _vitalStates.Clear();
-                        pState = new PeerVitalState();
-                        _vitalStates[stateKey] = pState;
-                    }
-
-                    float dx = pState.Initialized ? (x - pState.LastX) : 0f;
-                    float dy = pState.Initialized ? (y - pState.LastY) : 0f;
-                    float dz = pState.Initialized ? (z - pState.LastZ) : 0f;
-                    float horizDist = (float)Math.Sqrt(dx * dx + dz * dz);
-                    float speedMps = horizDist / ExportIntervalSeconds;
-                    if (horizDist > 0.4f)
-                    {
-                        pState.Heading = (float)(((Math.Atan2(dx, dz) * 180.0) / Math.PI + 360.0) % 360.0);
-                    }
-
-                    float maxStamina = rawMaxStamina > 0f
-                        ? rawMaxStamina
-                        : (maxHp <= 25.5f ? 50f : (float)Math.Round(50f + (maxHp - 25f) * 0.85f));
-
-                    float stamina;
-                    if (rawStamina >= 0f)
-                    {
-                        stamina = rawStamina;
-                    }
-                    else
-                    {
-                        if (!pState.Initialized)
-                        {
-                            pState.Stamina = maxStamina;
-                        }
-                        // Drain stamina when sprinting (>4.3 m/s), climbing steep terrain, swimming, or in noisy combat/harvesting
-                        float drain = 0f;
-                        if (speedMps > 4.3f && speedMps < 14f)
-                        {
-                            drain += (speedMps - 4.0f) * 4.2f;
-                        }
-                        if (dy > 0.7f && horizDist < 20f)
-                        {
-                            drain += dy * 2.5f;
-                        }
-                        if (y < 29.3f && speedMps > 0.4f)
-                        {
-                            drain += 9.0f;
-                        }
-                        if (zdoNoise >= 20f)
-                        {
-                            drain += Math.Min(22f, zdoNoise * 0.35f);
-                        }
-                        if (hp < pState.LastHp - 0.5f)
-                        {
-                            drain += 12f;
-                        }
-
-                        if (drain > 0.5f)
-                        {
-                            pState.Stamina = Math.Max(4f, pState.Stamina - drain);
-                        }
-                        else
-                        {
-                            float regen = speedMps < 0.4f ? 16f : 9f;
-                            pState.Stamina = Math.Min(maxStamina, pState.Stamina + regen);
-                        }
-                        stamina = Math.Min(maxStamina, pState.Stamina);
-                    }
-
-                    string activity = "Exploring";
-                    if (pState.Initialized && hp < pState.LastHp - 0.5f)
-                    {
-                        activity = "In Combat (Taking Damage!)";
-                    }
-                    else if (zdoNoise >= 30f)
-                    {
-                        activity = "Combat / Harvesting";
-                    }
-                    else if (y < 29.3f && speedMps > 0.4f)
-                    {
-                        activity = "Swimming / Sailing";
-                    }
-                    else if (speedMps > 8.0f)
-                    {
-                        activity = string.Format(CultureInfo.InvariantCulture, "Sailing ({0:F1} m/s)", speedMps);
-                    }
-                    else if (speedMps > 4.3f)
-                    {
-                        activity = string.Format(CultureInfo.InvariantCulture, "Sprinting ({0:F1} m/s)", speedMps);
-                    }
-                    else if (speedMps > 0.5f)
-                    {
-                        activity = string.Format(CultureInfo.InvariantCulture, "Hiking ({0:F1} m/s)", speedMps);
-                    }
-                    else
-                    {
-                        activity = "Resting / Encamped";
-                    }
-
-                    pState.LastX = x;
-                    pState.LastY = y;
-                    pState.LastZ = z;
-                    pState.LastHp = hp;
-                    pState.Initialized = true;
-                    processedNames.Add(playerName);
-
-                    if (!first) sb.Append(",\n");
-                    first = false;
-
-                    sb.Append("    {\n");
-                    sb.AppendFormat("      \"steamId\": \"{0}\",\n", EscapeJson(steamId));
-                    sb.AppendFormat("      \"name\": \"{0}\",\n", EscapeJson(playerName));
-                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"x\": {0:F1},\n", x);
-                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"y\": {0:F1},\n", y);
-                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"z\": {0:F1},\n", z);
-                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"heading\": {0:F0},\n", pState.Heading);
-                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"hp\": {0:F0},\n", hp);
-                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxHp\": {0:F0},\n", maxHp);
-                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"stamina\": {0:F0},\n", stamina);
-                    sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxStamina\": {0:F0},\n", maxStamina);
-                    sb.AppendFormat("      \"activity\": \"{0}\"\n", EscapeJson(activity));
-                    sb.Append("    }");
+                    x = rx; y = ry; z = rz;
                 }
+
+                string steamId = "";
+                object socketObj = GetFieldVal(peerType, peer, "m_socket", InstFlags);
+                if (socketObj != null)
+                {
+                    steamId = InvokeMethod(socketObj.GetType(), socketObj, "GetHostName", InstFlags) as string ?? "";
+                }
+                if (string.IsNullOrEmpty(steamId))
+                {
+                    try
+                    {
+                        object uidObj = GetFieldVal(peerType, peer, "m_uid", InstFlags);
+                        if (uidObj != null)
+                        {
+                            long uid = Convert.ToInt64(uidObj);
+                            if (uid > 0) steamId = uid.ToString();
+                        }
+                    }
+                    catch { }
+                }
+                string stateKey = !string.IsNullOrEmpty(steamId) ? steamId : playerName;
+
+                float rawHp = -1f;
+                float rawMaxHp = -1f;
+                float rawStamina = -1f;
+                float rawMaxStamina = -1f;
+                float zdoNoise = 0f;
+
+                if (charIdObj != null && _getZdoMethod != null && zdoManInstance != null)
+                {
+                    try
+                    {
+                        object zdo = _getZdoMethod.Invoke(zdoManInstance, new[] { charIdObj });
+                        if (zdo != null)
+                        {
+                            EnsureZdoReflectionCached(zdo.GetType());
+                            object zdoPos = _zdoGetPosMethod != null ? _zdoGetPosMethod.Invoke(zdo, null) : null;
+                            if (zdoPos == null && _zdoPosField != null) zdoPos = _zdoPosField.GetValue(zdo);
+
+                            float zx, zy, zz;
+                            if (TryExtractVector3(zdoPos, out zx, out zy, out zz) && (zx != 0f || zz != 0f || zy > 1f))
+                            {
+                                x = zx; y = zy; z = zz;
+                            }
+
+                            rawHp = ReadZdoFloat(zdo, HashHealth, "health", -1f);
+                            rawMaxHp = ReadZdoFloat(zdo, HashMaxHealth, "max_health", -1f);
+                            rawStamina = ReadZdoFloat(zdo, HashStamina, "stamina", -1f);
+                            rawMaxStamina = ReadZdoFloat(zdo, HashMaxStamina, "max_stamina", -1f);
+                            zdoNoise = ReadZdoFloat(zdo, HashNoise, "noise", 0f);
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore transient ZDO error
+                    }
+                }
+
+                // Fallback to GetPlayerList if peer position is (0, 0)
+                Vec3 pPos;
+                if (x == 0f && z == 0f && playerListPositions.TryGetValue(playerName, out pPos))
+                {
+                    x = pPos.X; y = pPos.Y; z = pPos.Z;
+                }
+
+                // Resolve real Health & MaxHealth (Valheim base unfed health is 25 HP)
+                float maxHp = rawMaxHp > 0f ? rawMaxHp : (rawHp > 25f ? rawHp : 25f);
+                float hp = rawHp > 0f ? rawHp : maxHp;
+                if (hp > maxHp) maxHp = hp;
+
+                // Resolve or compute real-time Stamina & MaxStamina from live ZDO movement & action noise
+                PeerVitalState pState;
+                if (!_vitalStates.TryGetValue(stateKey, out pState))
+                {
+                    if (_vitalStates.Count > 64) _vitalStates.Clear();
+                    pState = new PeerVitalState();
+                    _vitalStates[stateKey] = pState;
+                }
+
+                float dx = pState.Initialized ? (x - pState.LastX) : 0f;
+                float dy = pState.Initialized ? (y - pState.LastY) : 0f;
+                float dz = pState.Initialized ? (z - pState.LastZ) : 0f;
+                float horizDist = (float)Math.Sqrt(dx * dx + dz * dz);
+                float speedMps = horizDist / ExportIntervalSeconds;
+                if (horizDist > 0.4f)
+                {
+                    pState.Heading = (float)(((Math.Atan2(dx, dz) * 180.0) / Math.PI + 360.0) % 360.0);
+                }
+
+                float maxStamina = rawMaxStamina > 0f
+                    ? rawMaxStamina
+                    : (maxHp <= 25.5f ? 50f : (float)Math.Round(50f + (maxHp - 25f) * 0.85f));
+
+                float stamina;
+                if (rawStamina >= 0f)
+                {
+                    stamina = rawStamina;
+                }
+                else
+                {
+                    if (!pState.Initialized)
+                    {
+                        pState.Stamina = maxStamina;
+                    }
+                    // Drain stamina when sprinting (>4.3 m/s), climbing steep terrain, swimming, or in noisy combat/harvesting
+                    float drain = 0f;
+                    if (speedMps > 4.3f && speedMps < 14f)
+                    {
+                        drain += (speedMps - 4.0f) * 4.2f;
+                    }
+                    if (dy > 0.7f && horizDist < 20f)
+                    {
+                        drain += dy * 2.5f;
+                    }
+                    if (y < 29.3f && speedMps > 0.4f)
+                    {
+                        drain += 9.0f;
+                    }
+                    if (zdoNoise >= 20f)
+                    {
+                        drain += Math.Min(22f, zdoNoise * 0.35f);
+                    }
+                    if (hp < pState.LastHp - 0.5f)
+                    {
+                        drain += 12f;
+                    }
+
+                    if (drain > 0.5f)
+                    {
+                        pState.Stamina = Math.Max(4f, pState.Stamina - drain);
+                    }
+                    else
+                    {
+                        float regen = speedMps < 0.4f ? 16f : 9f;
+                        pState.Stamina = Math.Min(maxStamina, pState.Stamina + regen);
+                    }
+                    stamina = Math.Min(maxStamina, pState.Stamina);
+                }
+
+                string activity = "Exploring";
+                if (pState.Initialized && hp < pState.LastHp - 0.5f)
+                {
+                    activity = "In Combat (Taking Damage!)";
+                }
+                else if (zdoNoise >= 30f)
+                {
+                    activity = "Combat / Harvesting";
+                }
+                else if (y < 29.3f && speedMps > 0.4f)
+                {
+                    activity = "Swimming / Sailing";
+                }
+                else if (speedMps > 8.0f)
+                {
+                    activity = string.Format(CultureInfo.InvariantCulture, "Sailing ({0:F1} m/s)", speedMps);
+                }
+                else if (speedMps > 4.3f)
+                {
+                    activity = string.Format(CultureInfo.InvariantCulture, "Sprinting ({0:F1} m/s)", speedMps);
+                }
+                else if (speedMps > 0.5f)
+                {
+                    activity = string.Format(CultureInfo.InvariantCulture, "Hiking ({0:F1} m/s)", speedMps);
+                }
+                else
+                {
+                    activity = "Resting / Encamped";
+                }
+
+                pState.LastX = x;
+                pState.LastY = y;
+                pState.LastZ = z;
+                pState.LastHp = hp;
+                pState.Initialized = true;
+                processedNames.Add(playerName);
+
+                bool hasValidGps = (x != 0f || z != 0f || y > 1f);
+                if (!first) sb.Append(",\n");
+                first = false;
+
+                sb.Append("    {\n");
+                sb.AppendFormat("      \"steamId\": \"{0}\",\n", EscapeJson(steamId));
+                sb.AppendFormat("      \"name\": \"{0}\",\n", EscapeJson(playerName));
+                sb.AppendFormat("      \"hasGps\": {0},\n", hasValidGps ? "true" : "false");
+                sb.AppendFormat(CultureInfo.InvariantCulture, "      \"x\": {0:F1},\n", x);
+                sb.AppendFormat(CultureInfo.InvariantCulture, "      \"y\": {0:F1},\n", y);
+                sb.AppendFormat(CultureInfo.InvariantCulture, "      \"z\": {0:F1},\n", z);
+                sb.AppendFormat(CultureInfo.InvariantCulture, "      \"heading\": {0:F0},\n", pState.Heading);
+                sb.AppendFormat(CultureInfo.InvariantCulture, "      \"hp\": {0:F0},\n", hp);
+                sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxHp\": {0:F0},\n", maxHp);
+                sb.AppendFormat(CultureInfo.InvariantCulture, "      \"stamina\": {0:F0},\n", stamina);
+                sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxStamina\": {0:F0},\n", maxStamina);
+                sb.AppendFormat("      \"activity\": \"{0}\"\n", EscapeJson(activity));
+                sb.Append("    }");
             }
 
             // Fallback: Check ZNet.GetPlayerList() for connected players who may not be in peersObj
-            if (playerListObj != null)
+            if (playerListSnapshot != null)
             {
-                foreach (var pi in playerListObj)
+                for (int i = 0; i < playerListSnapshot.Count; i++)
                 {
+                    var pi = playerListSnapshot[i];
                     if (pi == null) continue;
                     var piType = pi.GetType();
                     string piName = GetFieldVal(piType, pi, "m_name", InstFlags) as string;
@@ -995,7 +1078,7 @@ namespace HeimdallWatchtower
                                 if (zdoPos == null && _zdoPosField != null) zdoPos = _zdoPosField.GetValue(zdo);
 
                                 float zx, zy, zz;
-                                if (TryExtractVector3(zdoPos, out zx, out zy, out zz) && (zx != 0f || zz != 0f))
+                                if (TryExtractVector3(zdoPos, out zx, out zy, out zz) && (zx != 0f || zz != 0f || zy > 1f))
                                 {
                                     px = zx; py = zy; pz = zz;
                                 }
@@ -1039,12 +1122,14 @@ namespace HeimdallWatchtower
 
                     pState.LastX = px; pState.LastY = py; pState.LastZ = pz; pState.LastHp = hp; pState.Initialized = true;
 
+                    bool hasValidGps = (px != 0f || pz != 0f || py > 1f);
                     if (!first) sb.Append(",\n");
                     first = false;
 
                     sb.Append("    {\n");
                     sb.AppendFormat("      \"steamId\": \"{0}\",\n", EscapeJson(piName));
                     sb.AppendFormat("      \"name\": \"{0}\",\n", EscapeJson(piName));
+                    sb.AppendFormat("      \"hasGps\": {0},\n", hasValidGps ? "true" : "false");
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"x\": {0:F1},\n", px);
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"y\": {0:F1},\n", py);
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"z\": {0:F1},\n", pz);

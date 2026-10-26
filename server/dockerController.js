@@ -75,14 +75,14 @@ class DockerController {
         if (process.env.AUTO_CONFIGURE_SERVER !== 'false') {
           setTimeout(async () => {
             try {
-              // Check inside valheim-server container if BepInEx and all performance plugins are already installed
+              // Check inside valheim-server container if BepInEx and all performance plugins v1.6.0 are active
               let containerMissingMods = false;
               try {
                 const checkRes = await this.execInContainer(
                   [
                     '/bin/bash',
                     '-c',
-                    'grep -q \'^export BEPINEX="true"\' /usr/local/etc/valheim/defaults 2>/dev/null && test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && test -f /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll && echo "PRESENT"'
+                    'grep -q \'^export BEPINEX="true"\' /usr/local/etc/valheim/defaults 2>/dev/null && test -f /opt/valheim/bepinex/BepInEx/core/BepInEx.Preloader.dll && test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && test -f /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll && grep -q \'"pluginVersion": "1.6.0"\' /config/watchtower/live_map.json 2>/dev/null && ! pgrep -f "/opt/valheim/server/valheim_server" >/dev/null 2>&1 && echo "PRESENT"'
                   ],
                   10000
                 );
@@ -94,8 +94,8 @@ class DockerController {
               }
 
               // SEAMLESS AUTO-MIGRATION:
-              // Only run autoConfigureValheimServer if mods were newly deployed or missing in container,
-              // and pass forceRestart: false so we only restart valheim-server if files actually changed.
+              // Only run autoConfigureValheimServer if mods were newly deployed or missing/outdated in container,
+              // and pass forceRestart: false so we only restart valheim-server if files or process state actually changed.
               if (newlyDeployedMods || containerMissingMods) {
                 console.log(`[Performance Suite Migration] Deploying mods (${BUNDLED_PERFORMANCE_PLUGINS.map((m) => m.title).join(', ')})...`);
                 this.autoConfigureValheimServer({ forceRestart: false }).catch((err) => {
@@ -103,7 +103,7 @@ class DockerController {
                 });
               }
             } catch (_) {}
-          }, 8000);
+          }, 5000);
         }
       } else {
         this.setupSimulationMode();
@@ -156,12 +156,122 @@ class DockerController {
   }
 
   /**
+   * Ensures all bundled .dll plugins exist inside valheim-server:/config/bepinex/plugins/
+   * even if /config is not mounted as a shared volume between watchtower and valheim-server.
+   */
+  async ensurePluginsInContainer() {
+    if (!this.socketAvailable || !this.containerId) return;
+    try {
+      const pluginDir = path.join(__dirname, '..', 'bepinex-plugin');
+      const sizeOut = await this.execInContainer(
+        [
+          '/bin/bash',
+          '-c',
+          'mkdir -p /config/bepinex/plugins /config/watchtower && wc -c /config/bepinex/plugins/*.dll 2>/dev/null || true'
+        ],
+        10000
+      );
+
+      const remoteSizes = {};
+      if (sizeOut) {
+        for (const line of sizeOut.split(/\r?\n/)) {
+          const m = line.trim().match(/^(\d+)\s+\/config\/bepinex\/plugins\/([^\s]+)$/);
+          if (m) {
+            remoteSizes[m[2]] = Number(m[1]);
+          }
+        }
+      }
+
+      for (const p of BUNDLED_PERFORMANCE_PLUGINS) {
+        const srcPath = path.join(pluginDir, p.filename);
+        if (!fs.existsSync(srcPath)) continue;
+        const buf = fs.readFileSync(srcPath);
+        if (remoteSizes[p.filename] === buf.length) continue;
+
+        // Transfer .dll into valheim-server:/config/bepinex/plugins/ in 48KB base64 chunks
+        const b64 = buf.toString('base64');
+        const chunkSize = 48000;
+        const tmpB64 = `/tmp/${p.filename}.b64`;
+        for (let offset = 0; offset < b64.length; offset += chunkSize) {
+          const slice = b64.slice(offset, offset + chunkSize);
+          const op = offset === 0 ? '>' : '>>';
+          await this.execInContainer(['/bin/bash', '-c', `printf '%s' '${slice}' ${op} "${tmpB64}"`], 15000);
+        }
+        await this.execInContainer(
+          [
+            '/bin/bash',
+            '-c',
+            `base64 -d "${tmpB64}" > "/config/bepinex/plugins/${p.filename}" && rm -f "${tmpB64}"`
+          ],
+          15000
+        );
+      }
+    } catch (_) {}
+  }
+
+  /**
+   * Pulls /config/watchtower/live_map.json (and world_terrain.json if missing locally) from
+   * inside valheim-server when local files are missing or stale (e.g. unshared /config volume).
+   */
+  async syncWatchtowerFilesFromContainer() {
+    if (!this.socketAvailable || !this.containerId || this.isAutoConfiguring) return;
+    try {
+      const liveMapPath = path.join(this.configManager.watchtowerDir, 'live_map.json');
+      let needsLiveSync = !fs.existsSync(liveMapPath);
+      if (!needsLiveSync) {
+        try {
+          const stat = fs.statSync(liveMapPath);
+          if (Date.now() - stat.mtimeMs > 4500) {
+            needsLiveSync = true;
+          }
+        } catch (_) {
+          needsLiveSync = true;
+        }
+      }
+
+      if (needsLiveSync) {
+        const rawLive = await this.execInContainer(
+          ['sh', '-c', 'cat /config/watchtower/live_map.json 2>/dev/null || true'],
+          5000
+        );
+        if (rawLive && rawLive.startsWith('{') && rawLive.includes('"pluginStatus"')) {
+          try {
+            JSON.parse(rawLive);
+            fs.mkdirSync(this.configManager.watchtowerDir, { recursive: true });
+            const tmpPath = `${liveMapPath}.sync.tmp`;
+            fs.writeFileSync(tmpPath, rawLive, 'utf8');
+            fs.renameSync(tmpPath, liveMapPath);
+          } catch (_) {}
+        }
+      }
+
+      const terrainPath = path.join(this.configManager.watchtowerDir, 'world_terrain.json');
+      this.terrainSyncPollCount = (this.terrainSyncPollCount || 0) + 1;
+      if (!fs.existsSync(terrainPath) && this.terrainSyncPollCount % 4 === 1) {
+        const rawTerrain = await this.execInContainer(
+          ['sh', '-c', 'cat /config/watchtower/world_terrain.json 2>/dev/null || true'],
+          8000
+        );
+        if (rawTerrain && rawTerrain.startsWith('{') && rawTerrain.includes('"biomesBase64"')) {
+          try {
+            JSON.parse(rawTerrain);
+            fs.mkdirSync(this.configManager.watchtowerDir, { recursive: true });
+            const tmpTerrain = `${terrainPath}.sync.tmp`;
+            fs.writeFileSync(tmpTerrain, rawTerrain, 'utf8');
+            fs.renameSync(tmpTerrain, terrainPath);
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
+  /**
    * Automatically configures the running lloesche/valheim-server container:
    * 0. Creates a mandatory world backup via valheim-backup before making any change
    * 1. Installs performance suite into /config/bepinex/plugins/ (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter)
    * 2. Enables BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults inside valheim-server
    * 3. Runs /usr/local/bin/bepinex-updater inside valheim-server if BepInEx isn't installed yet
-   * 4. Copies all plugins into /opt/valheim/bepinex/BepInEx/plugins/ and gracefully restarts valheim-server
+   * 4. Copies all plugins into /opt/valheim/bepinex/BepInEx/plugins/ and /opt/valheim/dl/bepinex/BepInEx/plugins/ and gracefully restarts valheim-server
    */
   async autoConfigureValheimServer({ forceRestart = true } = {}) {
     if (this.isAutoConfiguring) {
@@ -187,10 +297,13 @@ class DockerController {
       }
 
       this.currentStatus.autoConfigState = 'configuring';
+      await this.ensurePluginsInContainer();
+
+      const worldNameSafe = (this.configManager.state.serverMeta.worldName || 'Dedicated').replace(/"/g, '');
       const setupScript = `
         set -e
         echo "[1/5] Creating /config/bepinex/plugins and /config/watchtower..."
-        mkdir -p /config/bepinex/plugins /config/watchtower
+        mkdir -p /config/bepinex/plugins /config/bepinex/config /config/watchtower
         chmod -R 777 /config/watchtower /config/bepinex || true
         NEEDS_RESTART=0
 
@@ -214,8 +327,10 @@ class DockerController {
 
         echo "[3/5] Checking BepInEx installation in /opt/valheim/bepinex..."
         export BEPINEX=true
-        if [ ! -f /opt/valheim/bepinex/valheim_server.x86_64 ] || [ ! -d /opt/valheim/bepinex/BepInEx ]; then
-          echo "Signaling /opt/valheim/dl/bepinex/merge & running /usr/local/bin/bepinex-updater..."
+        if [ ! -f /opt/valheim/bepinex/BepInEx/core/BepInEx.Preloader.dll ] && [ ! -f /opt/valheim/dl/bepinex/BepInEx/core/BepInEx.Preloader.dll ]; then
+          echo "Stopping valheim-server cleanly before initial BepInEx download..."
+          supervisorctl start valheim-backup >/dev/null 2>&1 || true
+          supervisorctl stop valheim-server >/dev/null 2>&1 || true
           mkdir -p /opt/valheim/dl/bepinex
           touch /opt/valheim/dl/bepinex/merge
           export DEBUG_REINSTALL_BEPINEX=true
@@ -223,18 +338,61 @@ class DockerController {
           NEEDS_RESTART=1
         fi
 
-        mkdir -p /opt/valheim/bepinex/BepInEx/plugins /config/bepinex/plugins /config/bepinex/config
+        # Merge /opt/valheim/server and /opt/valheim/dl/bepinex into /opt/valheim/bepinex BEFORE installing plugins
+        # so lloesche/valheim-server's startup rsync --delete never wipes out our plugins!
+        if [ -d /opt/valheim/dl/bepinex/BepInEx ]; then
+          if [ -f /opt/valheim/dl/bepinex/merge ] || [ ! -f /opt/valheim/bepinex/valheim_server.x86_64 ] || [ ! -f /opt/valheim/bepinex/BepInEx/core/BepInEx.Preloader.dll ]; then
+            echo "Merging /opt/valheim/server and /opt/valheim/dl/bepinex into /opt/valheim/bepinex..."
+            mkdir -p /opt/valheim/bepinex
+            if command -v rsync >/dev/null 2>&1; then
+              rsync -a /opt/valheim/server/ /opt/valheim/bepinex/ 2>/dev/null || true
+              rsync -a /opt/valheim/dl/bepinex/ /opt/valheim/bepinex/ 2>/dev/null || true
+            else
+              cp -rf /opt/valheim/server/* /opt/valheim/bepinex/ 2>/dev/null || true
+              cp -rf /opt/valheim/dl/bepinex/* /opt/valheim/bepinex/ 2>/dev/null || true
+            fi
+            rm -f /opt/valheim/dl/bepinex/merge 2>/dev/null || true
+            NEEDS_RESTART=1
+          fi
+        fi
+
+        mkdir -p /opt/valheim/bepinex/BepInEx/plugins /opt/valheim/bepinex/BepInEx/config /opt/valheim/dl/bepinex/BepInEx/plugins /opt/valheim/dl/bepinex/BepInEx/config /config/bepinex/plugins /config/bepinex/config
         if [ -d /config/bepinex/plugins ]; then
           for dll in /config/bepinex/plugins/*.dll; do
             [ -f "$dll" ] || continue
             base=$(basename "$dll")
             dest="/opt/valheim/bepinex/BepInEx/plugins/$base"
+            dlDest="/opt/valheim/dl/bepinex/BepInEx/plugins/$base"
             if [ ! -f "$dest" ] || ! cmp -s "$dll" "$dest"; then
               cp -f "$dll" "$dest" 2>/dev/null || true
               NEEDS_RESTART=1
             fi
+            if [ ! -f "$dlDest" ] || ! cmp -s "$dll" "$dlDest"; then
+              cp -f "$dll" "$dlDest" 2>/dev/null || true
+            fi
           done
           echo "[4/5] Synchronized performance suite into /opt/valheim/bepinex/BepInEx/plugins/"
+        fi
+
+        # Ensure HideManagerGameObject = true in BepInEx.cfg so Valheim scene transitions do not destroy BepInEx_Manager
+        for cfgDir in /opt/valheim/bepinex/BepInEx/config /opt/valheim/dl/bepinex/BepInEx/config; do
+          cfgFile="$cfgDir/BepInEx.cfg"
+          if [ -f "$cfgFile" ]; then
+            if grep -q '^HideManagerGameObject = false' "$cfgFile" 2>/dev/null; then
+              sed -i 's/^HideManagerGameObject = false/HideManagerGameObject = true/g' "$cfgFile" 2>/dev/null || true
+              NEEDS_RESTART=1
+            fi
+          else
+            printf "[Chainloader]\\nHideManagerGameObject = true\\n" > "$cfgFile" 2>/dev/null || true
+          fi
+        done
+
+        # If vanilla valheim_server (without BepInEx) is running or live_map.json is missing/outdated, schedule restart
+        if pgrep -f "/opt/valheim/server/valheim_server" >/dev/null 2>&1; then
+          NEEDS_RESTART=1
+        fi
+        if ! grep -q '"pluginVersion": "1.6.0"' /config/watchtower/live_map.json 2>/dev/null; then
+          NEEDS_RESTART=1
         fi
 
         # Symlink LogOutput.log and config directory so Watchtower can inspect live logs & configs directly in /config/bepinex/
@@ -245,13 +403,24 @@ class DockerController {
         # Ensure non-root Valheim server user (PUID/PGID) owns BepInEx and can write to /config/watchtower
         TARGET_UID=\${PUID:-3001}
         TARGET_GID=\${PGID:-999}
-        chown -R "\$TARGET_UID:\$TARGET_GID" /opt/valheim/bepinex /config/bepinex /config/watchtower 2>/dev/null || true
+        chown -R "\$TARGET_UID:\$TARGET_GID" /opt/valheim/bepinex /opt/valheim/dl/bepinex /config/bepinex /config/watchtower 2>/dev/null || true
         chmod -R 777 /config/watchtower 2>/dev/null || true
 
         if [ "${forceRestart ? '1' : '0'}" = "1" ] || [ "$NEEDS_RESTART" = "1" ]; then
+          cat << 'EOF_MAP' > /config/watchtower/live_map.json
+{
+  "pluginStatus": "configuring_and_restarting_server",
+  "pluginVersion": "1.6.0",
+  "worldName": "${worldNameSafe}",
+  "lastUpdated": "${timestamp}",
+  "timestamp": "${timestamp}",
+  "players": []
+}
+EOF_MAP
+          chmod 666 /config/watchtower/live_map.json 2>/dev/null || true
           echo "[5/5] Creating safety backup & gracefully restarting valheim-server..."
           supervisorctl start valheim-backup >/dev/null 2>&1 || true
-          supervisorctl restart valheim-server || true
+          supervisorctl restart valheim-server || supervisorctl start valheim-server || true
           echo "RESTARTED_WITH_BEPINEX"
         else
           echo "[5/5] BepInEx and Performance Suite already active."
@@ -259,7 +428,9 @@ class DockerController {
         fi
       `;
 
-      if (forceRestart) {
+      // Allow up to 180s (3 minutes) for backup + BepInEx download + rsync + graceful server restart
+      const out = await this.execInContainer(['/bin/bash', '-c', setupScript], 180000);
+      if (out && out.includes('RESTARTED_WITH_BEPINEX')) {
         try {
           const liveMapPath = path.join(this.configManager.watchtowerDir, 'live_map.json');
           fs.writeFileSync(
@@ -267,9 +438,10 @@ class DockerController {
             JSON.stringify(
               {
                 pluginStatus: 'configuring_and_restarting_server',
-                pluginVersion: '1.5.0',
+                pluginVersion: '1.6.0',
                 worldName: this.configManager.state.serverMeta.worldName || 'Dedicated',
                 lastUpdated: timestamp,
+                timestamp,
                 players: []
               },
               null,
@@ -280,9 +452,6 @@ class DockerController {
           this.configManager.applyOwnership(liveMapPath);
         } catch (_) {}
       }
-
-      // Allow up to 180s (3 minutes) for backup + BepInEx download + rsync + graceful server restart
-      const out = await this.execInContainer(['/bin/bash', '-c', setupScript], 180000);
       this.currentStatus.autoConfigState = 'configured';
       this.currentStatus.envConfig.BEPINEX = 'true';
       this.currentStatus.envConfig.STATUS_HTTP = 'true';
@@ -1100,6 +1269,7 @@ class DockerController {
     try {
       if (this.socketAvailable) {
         await this.refreshContainerStatus();
+        await this.syncWatchtowerFilesFromContainer();
         // Also query lloesche's status.json if available
         const statusJson = await fetchStatusJson({ host: this.currentStatus.containerIp, port: 80 });
         if (statusJson && statusJson.server_name) {

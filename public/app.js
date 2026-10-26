@@ -2280,7 +2280,7 @@ function renderLiveMapAndVitals() {
     } else {
       vitalsList.innerHTML = livePlayers
         .map((lp) => {
-          const hasGps = lp.hasGps !== false && (lp.x !== 0 || lp.z !== 0);
+          const hasGps = lp.hasGps !== false && (lp.x !== 0 || lp.z !== 0 || (lp.y && lp.y > 1));
           const hpPct = Math.max(5, Math.min(100, Math.round((lp.hp / Math.max(1, lp.maxHp)) * 100)));
           const stamPct = Math.max(5, Math.min(100, Math.round((lp.stamina / Math.max(1, lp.maxStamina)) * 100)));
           const resolvedBiome = hasGps
