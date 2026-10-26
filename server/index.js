@@ -89,6 +89,8 @@ app.get('/api/stream', (req, res) => {
   };
 
   req.on('close', cleanup);
+  req.on('error', cleanup);
+  res.on('close', cleanup);
   res.on('error', cleanup);
 });
 
@@ -271,7 +273,7 @@ app.post('/api/settings/test-discord', async (req, res) => {
 });
 
 // Live World Map & Player Telemetry Endpoints
-app.get('/api/map', (req, res) => {
+app.get(['/api/map', '/api/world-map'], (req, res) => {
   res.json(mapEngine.getSnapshot());
 });
 
@@ -281,7 +283,7 @@ app.post('/api/map/telemetry', (req, res) => {
     broadcastSSE('telemetry', {
       container: dockerController.currentStatus,
       telemetryHistory: dockerController.telemetryHistory,
-      worldMap: mapEngine.getSnapshot(),
+      worldMap: mapEngine.getSnapshot({ includeTerrainGrid: false }),
       onlineCount: Object.values(configManager.state.players).filter((p) => p.online).length
     });
     res.json({ ok: true });
@@ -292,23 +294,36 @@ app.post('/api/map/telemetry', (req, res) => {
 
 // Simulate Viking Events (for testing / previewing live log detection)
 app.post('/api/simulate/event', (req, res) => {
-  const { eventType, playerName = 'Erik the Red', steamId = '76561198201948572', raidCode = 'foresttrolls' } = req.body;
-  const nowStr = dockerController.formatValheimDate();
+  try {
+    const { eventType, playerName = 'Erik the Red', steamId = '76561198201948572', raidCode = 'foresttrolls' } = req.body || {};
+    const nowStr = dockerController.formatValheimDate();
 
-  if (eventType === 'join') {
-    logParser.processLine(`${nowStr}: Got handshake from client ${steamId}`);
-    logParser.processLine(`${nowStr}: Got character ZDOID from ${playerName} : 418999102:1`);
-  } else if (eventType === 'death') {
-    logParser.processLine(`${nowStr}: Got character ZDOID from ${playerName} : 0:0`);
-    mapEngine.recordPlayerDeathTombstone(playerName, steamId);
-  } else if (eventType === 'leave') {
-    logParser.processLine(`${nowStr}: Closing socket ${steamId}`);
-  } else if (eventType === 'raid') {
-    logParser.processLine(`${nowStr}: Random event set:${raidCode}`);
+    if (eventType === 'join') {
+      logParser.processLine(`${nowStr}: Got handshake from client ${steamId}`);
+      logParser.processLine(`${nowStr}: Got character ZDOID from ${playerName} : 418999102:1`);
+    } else if (eventType === 'death') {
+      logParser.processLine(`${nowStr}: Got character ZDOID from ${playerName} : 0:0`);
+      mapEngine.recordPlayerDeathTombstone(playerName, steamId);
+    } else if (eventType === 'leave') {
+      logParser.processLine(`${nowStr}: Closing socket ${steamId}`);
+    } else if (eventType === 'raid') {
+      logParser.processLine(`${nowStr}: Random event set:${raidCode}`);
+    }
+
+    mapEngine.tickLiveState();
+    res.json({ ok: true, overview: buildOverviewPayload() });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
   }
+});
 
-  mapEngine.tickLiveSimulation();
-  res.json({ ok: true, overview: buildOverviewPayload() });
+// Global process safety handlers so transient socket errors never crash Watchtower
+process.on('uncaughtException', (err) => {
+  console.error('[Watchtower Uncaught Exception]', err && err.message ? err.message : err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[Watchtower Unhandled Rejection]', reason && reason.message ? reason.message : reason);
 });
 
 async function start() {

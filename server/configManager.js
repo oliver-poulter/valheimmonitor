@@ -6,20 +6,118 @@ const DEFAULT_CONFIG_DIR = process.env.VALHEIM_CONFIG_DIR || (
 );
 
 const RAID_LORE_MAP = {
-  army_eikthyr: { name: 'Eikthyr Rallies the Creatures of the Forest', biome: 'Meadows', icon: '🦌', severity: 'Low' },
-  army_theelder: { name: 'The Forest Is Moving...', biome: 'Black Forest', icon: '🌲', severity: 'Medium' },
-  foresttrolls: { name: 'The Ground Is Shaking!', biome: 'Black Forest', icon: '👹', severity: 'High' },
-  army_bonemass: { name: 'A Foul Smell from the Swamp...', biome: 'Swamp', icon: '☠️', severity: 'Medium' },
-  blobs: { name: 'A Foul Smell from the Swamp (Blobs)', biome: 'Swamp', icon: '🟢', severity: 'Medium' },
-  skeletons: { name: 'Skeleton Surprise!', biome: 'Swamp / Black Forest', icon: '💀', severity: 'Medium' },
-  surtlings: { name: 'There\'s a Smell of Sulfur in the Air...', biome: 'Swamp / Ashlands', icon: '🔥', severity: 'High' },
-  army_moder: { name: 'A Cold Wind Blows from the Mountains...', biome: 'Mountains', icon: '🐉', severity: 'High' },
-  wolves: { name: 'You Are Being Hunted!', biome: 'Mountains / Plains', icon: '🐺', severity: 'Extreme' },
-  bats: { name: 'You Stirred the Cauldron!', biome: 'Mountain Caves', icon: '🦇', severity: 'Low' },
-  army_goblin: { name: 'The Horde Is Attacking!', biome: 'Plains', icon: '👺', severity: 'Extreme' },
-  army_GJALL: { name: 'What\'s Up, Gjall?!', biome: 'Mistlands', icon: '🎈', severity: 'Extreme' },
-  seekers: { name: 'They Sought You Out!', biome: 'Mistlands', icon: '🪲', severity: 'Extreme' },
-  army_charred: { name: 'The Undead Army Marches!', biome: 'Ashlands', icon: '🌋', severity: 'Nightmare' }
+  army_eikthyr: {
+    name: 'Eikthyr Rallies the Creatures of the Forest',
+    biome: 'Meadows',
+    icon: '🦌',
+    severity: 'Low',
+    durationSec: 90,
+    lore: 'Wild boars and necks charge from the brush at the antlered stag-god\'s call.'
+  },
+  army_theelder: {
+    name: 'The Forest Is Moving...',
+    biome: 'Black Forest',
+    icon: '🌲',
+    severity: 'Medium',
+    durationSec: 120,
+    lore: 'Greydwarf brutes and shamans march from the dark pines to reclaim the hearth.'
+  },
+  foresttrolls: {
+    name: 'The Ground Is Shaking!',
+    biome: 'Black Forest',
+    icon: '👹',
+    severity: 'High',
+    durationSec: 80,
+    lore: 'Towering blue forest trolls wield uprooted logs against your palisades.'
+  },
+  army_bonemass: {
+    name: 'A Foul Smell from the Swamp...',
+    biome: 'Swamp',
+    icon: '☠️',
+    severity: 'Medium',
+    durationSec: 150,
+    lore: 'Draugr and skeletons rise from the fetid mire to lay siege to your longhouse.'
+  },
+  blobs: {
+    name: 'A Foul Smell from the Swamp (Blobs)',
+    biome: 'Swamp',
+    icon: '🟢',
+    severity: 'Medium',
+    durationSec: 120,
+    lore: 'Poisonous blobs and oozers seep across the ramparts in toxic clouds.'
+  },
+  skeletons: {
+    name: 'Skeleton Surprise!',
+    biome: 'Swamp / Black Forest',
+    icon: '💀',
+    severity: 'Medium',
+    durationSec: 120,
+    lore: 'An unholy legion of Rancid Remains and archers rattles at the gates.'
+  },
+  surtlings: {
+    name: 'There\'s a Smell of Sulfur in the Air...',
+    biome: 'Swamp / Ashlands',
+    icon: '🔥',
+    severity: 'High',
+    durationSec: 120,
+    lore: 'Fiery Surtlings rain embers from the sky upon wooden roofs and walls.'
+  },
+  army_moder: {
+    name: 'A Cold Wind Blows from the Mountains...',
+    biome: 'Mountains',
+    icon: '🐉',
+    severity: 'High',
+    durationSec: 150,
+    lore: 'Freezing blizzards herald a flock of Drakes and Stone Golems.'
+  },
+  wolves: {
+    name: 'You Are Being Hunted!',
+    biome: 'Mountains / Plains',
+    icon: '🐺',
+    severity: 'Extreme',
+    durationSec: 120,
+    lore: 'A relentless pack of mountain wolves tracks your scent across the wilderness.'
+  },
+  bats: {
+    name: 'You Stirred the Cauldron!',
+    biome: 'Mountain Caves',
+    icon: '🦇',
+    severity: 'Low',
+    durationSec: 90,
+    lore: 'Swarms of shrieking cave bats descend from the night sky.'
+  },
+  army_goblin: {
+    name: 'The Horde Is Attacking!',
+    biome: 'Plains',
+    icon: '👺',
+    severity: 'Extreme',
+    durationSec: 120,
+    lore: 'Fuling berserkers, shamans, and torchbearers launch an all-out warband assault.'
+  },
+  army_GJALL: {
+    name: 'What\'s Up, Gjall?!',
+    biome: 'Mistlands',
+    icon: '🎈',
+    severity: 'Extreme',
+    durationSec: 120,
+    lore: 'Floating Gjall dreadnoughts sound their warhorns through the mist.'
+  },
+  seekers: {
+    name: 'They Sought You Out!',
+    biome: 'Mistlands',
+    icon: '🪲',
+    severity: 'Extreme',
+    durationSec: 120,
+    lore: 'Chitinous Seeker soldiers and broods swarm your fortifications.'
+  },
+  army_charred: {
+    name: 'The Undead Army Marches!',
+    biome: 'Ashlands',
+    icon: '🌋',
+    severity: 'Nightmare',
+    durationSec: 150,
+    lore: 'Charred warriors, marksmen, and Twitchers advance through volcanic ash.'
+  }
 };
 
 const BUNDLED_PERFORMANCE_PLUGINS = [
@@ -341,10 +439,18 @@ class ConfigManager {
   }
 
   saveState() {
+    const content = JSON.stringify(this.state, null, 2);
+    const tmpFile = `${this.statsFile}.tmp`;
     try {
-      fs.writeFileSync(this.statsFile, JSON.stringify(this.state, null, 2), 'utf8');
+      fs.writeFileSync(tmpFile, content, 'utf8');
+      fs.renameSync(tmpFile, this.statsFile);
       this.applyOwnership(this.statsFile);
-    } catch (_) {}
+    } catch (_) {
+      try {
+        fs.writeFileSync(this.statsFile, content, 'utf8');
+        this.applyOwnership(this.statsFile);
+      } catch (__) {}
+    }
   }
 
   /**

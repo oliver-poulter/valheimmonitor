@@ -221,8 +221,16 @@ async function fetchLogs() {
   } catch (_) {}
 }
 
+let sseSource = null;
+
 function connectSSE() {
+  if (sseSource) {
+    try {
+      sseSource.close();
+    } catch (_) {}
+  }
   const es = new EventSource('/api/stream');
+  sseSource = es;
 
   es.addEventListener('open', () => {
     fetchOverview();
@@ -1211,6 +1219,9 @@ function appendTerminalLine(cmd, output, source, isError = false) {
     <div class="term-line ${isError ? 'term-err' : 'term-out'}">${escapeHtml(output)}</div>
   `;
   term.appendChild(block);
+  while (term.children.length > 150) {
+    term.removeChild(term.firstElementChild);
+  }
   term.scrollTop = term.scrollHeight;
 }
 
@@ -1442,6 +1453,20 @@ function populateSettingsAndModifiers() {
   document.getElementById('settingRconHost').value = s.rconHost || 'valheim-server';
   document.getElementById('settingRconPort').value = s.rconPort || 2458;
 
+  if (s.worldModifiers) {
+    const wm = s.worldModifiers;
+    const setSelectIfIdle = (id, val) => {
+      const el = document.getElementById(id);
+      if (el && val && document.activeElement !== el) el.value = val;
+    };
+    setSelectIfIdle('modPreset', wm.preset);
+    setSelectIfIdle('modCombat', wm.combat);
+    setSelectIfIdle('modDeath', wm.deathpenalty);
+    setSelectIfIdle('modResources', wm.resources);
+    setSelectIfIdle('modRaids', wm.raids);
+    setSelectIfIdle('modPortals', wm.portals);
+  }
+
   updateServerArgsPreview();
   updateDiscordEmbedPreview();
 
@@ -1518,7 +1543,15 @@ async function saveIntegrationSettings(e) {
       notifyOnRaid: document.getElementById('chkRaid').checked,
       notifyOnBackup: document.getElementById('chkBackup').checked,
       rconHost: document.getElementById('settingRconHost').value.trim(),
-      rconPort: Number(document.getElementById('settingRconPort').value || 2458)
+      rconPort: Number(document.getElementById('settingRconPort').value || 2458),
+      worldModifiers: {
+        preset: document.getElementById('modPreset')?.value || 'Normal',
+        combat: document.getElementById('modCombat')?.value || 'default',
+        deathpenalty: document.getElementById('modDeath')?.value || 'default',
+        resources: document.getElementById('modResources')?.value || 'default',
+        raids: document.getElementById('modRaids')?.value || 'default',
+        portals: document.getElementById('modPortals')?.value || 'default'
+      }
     };
     const res = await fetch('/api/settings', {
       method: 'POST',
@@ -2125,8 +2158,11 @@ function renderLiveMapAndVitals() {
   const wm = appState.worldMap;
   if (!wm.terrainGrid && !isFetchingTerrainGrid) {
     isFetchingTerrainGrid = true;
-    fetch('/api/world-map')
-      .then((r) => r.json())
+    fetch('/api/map')
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((data) => {
         if (data && data.terrainGrid) {
           if (appState && appState.worldMap) {
@@ -2321,7 +2357,9 @@ function renderLiveMapAndVitals() {
     poiList.innerHTML = poiHtml || `<div class="viking-meta-line">No active death tombstones or portals recorded.</div>`;
   }
 
-  drawValheimMap();
+  if (document.getElementById('tab-map')?.classList.contains('active')) {
+    drawValheimMap();
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -2883,6 +2921,8 @@ function drawValheimMapIcon(ctx, type, name, x, y) {
   ctx.restore();
 }
 
+let cachedFogCanvas = null;
+
 function drawValheimMap() {
   const canvas = document.getElementById('valheimMapCanvas');
   if (!canvas || !appState || !appState.worldMap) return;
@@ -2938,10 +2978,17 @@ function drawValheimMap() {
 
   const showFog = document.getElementById('toggleFogOfWar')?.checked === true;
   if (showFog) {
-    const offCanvas = document.createElement('canvas');
-    offCanvas.width = w;
-    offCanvas.height = h;
+    if (!cachedFogCanvas) {
+      cachedFogCanvas = document.createElement('canvas');
+    }
+    if (cachedFogCanvas.width !== w || cachedFogCanvas.height !== h) {
+      cachedFogCanvas.width = w;
+      cachedFogCanvas.height = h;
+    }
+    const offCanvas = cachedFogCanvas;
     const fctx = offCanvas.getContext('2d');
+    fctx.globalCompositeOperation = 'source-over';
+    fctx.clearRect(0, 0, w, h);
 
     const fPat = fctx.createPattern(parchmentCanvas, 'repeat');
     fctx.fillStyle = fPat || '#baa274';

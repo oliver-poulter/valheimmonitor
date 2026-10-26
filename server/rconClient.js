@@ -77,25 +77,37 @@ function executeRconCommand({ host, port = 2458, password = '', command, timeout
  */
 function fetchStatusJson({ host, port = 80, timeout = 2000 }) {
   return new Promise((resolve) => {
+    let settled = false;
+    const done = (val) => {
+      if (settled) return;
+      settled = true;
+      resolve(val);
+    };
+
     const req = http.get({ host, port, path: '/status.json', timeout }, (res) => {
+      res.on('error', () => done(null));
       if (res.statusCode !== 200) {
         res.resume();
-        return resolve(null);
+        return done(null);
       }
       let raw = '';
-      res.on('data', (chunk) => (raw += chunk));
+      res.on('data', (chunk) => {
+        if (raw.length < 65536) raw += chunk;
+      });
       res.on('end', () => {
         try {
-          resolve(JSON.parse(raw));
+          done(JSON.parse(raw));
         } catch (_) {
-          resolve(null);
+          done(null);
         }
       });
     });
-    req.on('error', () => resolve(null));
+    req.on('error', () => done(null));
     req.on('timeout', () => {
-      req.destroy();
-      resolve(null);
+      try {
+        req.destroy();
+      } catch (_) {}
+      done(null);
     });
   });
 }

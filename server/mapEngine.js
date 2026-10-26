@@ -16,6 +16,8 @@ class ValheimMapEngine {
     this.liveMapFile = path.join(this.configManager.watchtowerDir, 'live_map.json');
     this.worldTerrainFile = path.join(this.configManager.watchtowerDir, 'world_terrain.json');
     this.terrainMtime = 0;
+    this.liveMapMtime = 0;
+    this.cachedLiveMapData = null;
     this.isDockerMode = fs.existsSync(process.env.DOCKER_SOCKET || '/var/run/docker.sock');
 
     this.mapState = {
@@ -183,7 +185,12 @@ class ValheimMapEngine {
     // 1. Always check if the real BepInEx plugin wrote /config/watchtower/live_map.json
     if (fs.existsSync(this.liveMapFile)) {
       try {
-        const externalData = JSON.parse(fs.readFileSync(this.liveMapFile, 'utf8'));
+        const stat = fs.statSync(this.liveMapFile);
+        if (stat.mtimeMs > this.liveMapMtime || !this.cachedLiveMapData) {
+          this.liveMapMtime = stat.mtimeMs;
+          this.cachedLiveMapData = JSON.parse(fs.readFileSync(this.liveMapFile, 'utf8'));
+        }
+        const externalData = this.cachedLiveMapData;
         this.mapState.bepinexTelemetryActive = true;
         const pStatus = externalData.pluginStatus || 'active';
         let statusLabel = '✅ BepInEx ZDO Live Telemetry (/config/watchtower/live_map.json)';
@@ -417,6 +424,10 @@ class ValheimMapEngine {
         discoveredBy: playerName,
         biome: this.estimateBiome(x, z)
       });
+      if (this.mapState.discoveredZones.length > 400) {
+        // Keep spawn zone at index 0 and prune oldest exploration point
+        this.mapState.discoveredZones.splice(1, 1);
+      }
     }
   }
 

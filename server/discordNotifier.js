@@ -44,6 +44,13 @@ function sendDiscordNotification(webhookUrl, event) {
   });
 
   return new Promise((resolve) => {
+    let settled = false;
+    const done = (val) => {
+      if (settled) return;
+      settled = true;
+      resolve(val);
+    };
+
     try {
       const urlObj = new URL(webhookUrl);
       const lib = urlObj.protocol === 'https:' ? https : http;
@@ -53,21 +60,31 @@ function sendDiscordNotification(webhookUrl, event) {
           port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
           path: urlObj.pathname + urlObj.search,
           method: 'POST',
+          timeout: 8000,
           headers: {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(payload)
           }
         },
         (res) => {
+          res.on('error', () => done({ sent: false, reason: 'Response stream error' }));
           res.resume();
-          resolve({ sent: res.statusCode >= 200 && res.statusCode < 300, statusCode: res.statusCode });
+          res.on('end', () => {
+            done({ sent: res.statusCode >= 200 && res.statusCode < 300, statusCode: res.statusCode });
+          });
         }
       );
-      req.on('error', (err) => resolve({ sent: false, reason: err.message }));
+      req.on('error', (err) => done({ sent: false, reason: err.message }));
+      req.on('timeout', () => {
+        try {
+          req.destroy();
+        } catch (_) {}
+        done({ sent: false, reason: 'Discord webhook request timed out' });
+      });
       req.write(payload);
       req.end();
     } catch (err) {
-      resolve({ sent: false, reason: err.message });
+      done({ sent: false, reason: err.message });
     }
   });
 }

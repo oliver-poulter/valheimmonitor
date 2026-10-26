@@ -2,13 +2,15 @@
 // WatchtowerMapExporter.cs — Version-Independent Reflection BepInEx Plugin
 // Auto-installed into /config/bepinex/plugins/WatchtowerMapExporter.dll
 //
-// Uses reflection against assembly_valheim (ZNet & ZDOMan) so it never breaks
-// across Valheim updates. Exports live player (X, Y, Z) coordinates, Health,
-// MaxHealth, and Stamina to /config/watchtower/live_map.json every 2 seconds.
+// Uses cached reflection against assembly_valheim (ZNet & ZDOMan) so it never
+// breaks across Valheim updates and produces near-zero GC pressure in Mono.
+// Exports live player (X, Y, Z) coordinates, Health, MaxHealth, and Stamina
+// to /config/watchtower/live_map.json every 2 seconds.
 // ============================================================================
 
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
@@ -42,6 +44,58 @@ namespace HeimdallWatchtower
         private MethodInfo _getHeightMethod;
         private int _getHeightParamCount;
 
+        // Cached reflection members to avoid per-tick allocations in Mono Boehm GC
+        private MethodInfo _getZdoMethod;
+        private bool _getZdoMethodSearched;
+        private static Type _cachedZdoType;
+        private static MethodInfo _zdoGetFloatIntMethod;
+        private static MethodInfo _zdoGetFloatStrMethod;
+        private static MethodInfo _zdoGetPosMethod;
+        private static FieldInfo _zdoPosField;
+
+        private static Type _cachedVecType;
+        private static FieldInfo _vecXField;
+        private static FieldInfo _vecYField;
+        private static FieldInfo _vecZField;
+
+        private string _cachedLandmarksJson;
+
+        // Pre-computed Valheim stable ZDO variable hashes
+        private static readonly int HashHealth = GetValheimStableHashCode("health");
+        private static readonly int HashMaxHealth = GetValheimStableHashCode("max_health");
+        private static readonly int HashStamina = GetValheimStableHashCode("stamina");
+        private static readonly int HashMaxStamina = GetValheimStableHashCode("max_stamina");
+        private static readonly int HashNoise = GetValheimStableHashCode("noise");
+
+        private const BindingFlags InstFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+        private static object GetFieldVal(Type t, object target, string name, BindingFlags flags)
+        {
+            if (t == null) return null;
+            FieldInfo f = t.GetField(name, flags);
+            return f != null ? f.GetValue(target) : null;
+        }
+
+        private static object GetPropVal(Type t, object target, string name, BindingFlags flags)
+        {
+            if (t == null) return null;
+            PropertyInfo p = t.GetProperty(name, flags);
+            return (p != null && p.GetIndexParameters().Length == 0) ? p.GetValue(target, null) : null;
+        }
+
+        private static object GetMemberVal(Type t, object target, string name, BindingFlags flags)
+        {
+            object v = GetFieldVal(t, target, name, flags);
+            return v != null ? v : GetPropVal(t, target, name, flags);
+        }
+
+        private static object InvokeMethod(Type t, object target, string name, BindingFlags flags)
+        {
+            if (t == null) return null;
+            MethodInfo m = t.GetMethod(name, flags);
+            return m != null ? m.Invoke(target, null) : null;
+        }
+
         private void Awake()
         {
             try
@@ -60,12 +114,13 @@ namespace HeimdallWatchtower
         {
             try
             {
-                var sb = new StringBuilder();
+                var sb = new StringBuilder(512);
                 sb.Append("{\n");
                 sb.AppendFormat("  \"pluginStatus\": \"{0}\",\n", EscapeJson(status));
                 sb.Append("  \"pluginVersion\": \"1.5.0\",\n");
-                sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
-                sb.AppendFormat("  \"timestamp\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
+                string nowIso = DateTime.UtcNow.ToString("o");
+                sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", nowIso);
+                sb.AppendFormat("  \"timestamp\": \"{0}\",\n", nowIso);
                 sb.Append("  \"players\": [],\n");
                 sb.Append("  \"landmarks\": [\n");
                 sb.Append("    { \"id\": \"lm-0\", \"type\": \"spawn\", \"name\": \"Sacrificial Stones\", \"icon\": \"🏛️\", \"biome\": \"Meadows\", \"x\": 0, \"z\": 0 }\n");
@@ -102,7 +157,7 @@ namespace HeimdallWatchtower
             }
             catch (Exception ex)
             {
-                Logger.LogError("[Heimdall Watchtower] ExportWorldAndPlayers error: " + ex);
+                Logger.LogError("[Heimdall Watchtower] ExportWorldAndPlayers error: " + ex.Message);
             }
         }
 
@@ -117,17 +172,6 @@ namespace HeimdallWatchtower
                     if (_zdoManType == null) _zdoManType = asm.GetType("ZDOMan");
                     if (_worldGenType == null) _worldGenType = asm.GetType("WorldGenerator");
                     if (_zoneSysType == null) _zoneSysType = asm.GetType("ZoneSystem");
-
-                    if (_znetType == null || _zdoManType == null || _worldGenType == null || _zoneSysType == null)
-                    {
-                        foreach (var t in asm.GetTypes())
-                        {
-                            if (_znetType == null && t.Name == "ZNet") _znetType = t;
-                            if (_zdoManType == null && t.Name == "ZDOMan") _zdoManType = t;
-                            if (_worldGenType == null && t.Name == "WorldGenerator") _worldGenType = t;
-                            if (_zoneSysType == null && t.Name == "ZoneSystem") _zoneSysType = t;
-                        }
-                    }
                 }
                 catch { }
             }
@@ -138,51 +182,29 @@ namespace HeimdallWatchtower
             if (t == null) return null;
             const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.FlattenHierarchy;
 
-            // 1. Check known singleton property names
+            // 1. Check known singleton field names first (fastest & side-effect free)
+            foreach (var fieldName in new[] { "m_instance", "s_instance", "instance", "_instance", "Instance" })
+            {
+                try
+                {
+                    var val = GetFieldVal(t, null, fieldName, flags);
+                    if (val != null) return val;
+                }
+                catch { }
+            }
+
+            // 2. Check known singleton property names
             foreach (var propName in new[] { "instance", "Instance", "s_instance", "_instance" })
             {
                 try
                 {
-                    var prop = t.GetProperty(propName, flags);
-                    if (prop != null && prop.GetIndexParameters().Length == 0)
-                    {
-                        var val = prop.GetValue(null, null);
-                        if (val != null) return val;
-                    }
+                    var val = GetPropVal(t, null, propName, flags);
+                    if (val != null) return val;
                 }
                 catch { }
             }
 
-            // 2. Check known singleton field names
-            foreach (var fieldName in new[] { "instance", "m_instance", "s_instance", "_instance", "Instance" })
-            {
-                try
-                {
-                    var field = t.GetField(fieldName, flags);
-                    if (field != null)
-                    {
-                        var val = field.GetValue(null);
-                        if (val != null) return val;
-                    }
-                }
-                catch { }
-            }
-
-            // 3. Scan all static properties returning t
-            try
-            {
-                foreach (var prop in t.GetProperties(flags))
-                {
-                    if (prop.GetIndexParameters().Length == 0 && t.IsAssignableFrom(prop.PropertyType))
-                    {
-                        var val = prop.GetValue(null, null);
-                        if (val != null) return val;
-                    }
-                }
-            }
-            catch { }
-
-            // 4. Scan all static fields of type t
+            // 3. Scan static fields assignable to t
             try
             {
                 foreach (var field in t.GetFields(flags))
@@ -196,14 +218,17 @@ namespace HeimdallWatchtower
             }
             catch { }
 
-            // 5. Unity Component search fallback: finds any active instance in the scene
+            // 4. Unity Component search fallback ONLY if t derives from UnityEngine.Object
             try
             {
-                var findMethod = typeof(UnityEngine.Object).GetMethod("FindObjectOfType", new[] { typeof(Type) });
-                if (findMethod != null)
+                if (typeof(UnityEngine.Object).IsAssignableFrom(t))
                 {
-                    var val = findMethod.Invoke(null, new object[] { t });
-                    if (val != null) return val;
+                    var findMethod = typeof(UnityEngine.Object).GetMethod("FindObjectOfType", new[] { typeof(Type) });
+                    if (findMethod != null)
+                    {
+                        var val = findMethod.Invoke(null, new object[] { t });
+                        if (val != null) return val;
+                    }
                 }
             }
             catch { }
@@ -217,17 +242,12 @@ namespace HeimdallWatchtower
             object inst = GetStaticInstance(_znetType);
             if (inst != null) return inst;
 
-            // Search ZNetScene, Game, FejdStartup for active ZNet reference
-            foreach (var helperName in new[] { "ZNetScene", "Game", "FejdStartup" })
+            // Search ZNetScene or Game for active ZNet reference
+            foreach (var helperName in new[] { "ZNetScene", "Game" })
             {
                 try
                 {
-                    Type ht = null;
-                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-                    {
-                        ht = asm.GetType(helperName);
-                        if (ht != null) break;
-                    }
+                    Type ht = _znetType.Assembly.GetType(helperName);
                     if (ht != null)
                     {
                         object hInst = GetStaticInstance(ht);
@@ -239,14 +259,6 @@ namespace HeimdallWatchtower
                                 if (_znetType.IsAssignableFrom(f.FieldType))
                                 {
                                     object val = f.GetValue(hInst);
-                                    if (val != null) return val;
-                                }
-                            }
-                            foreach (var p in ht.GetProperties(flags))
-                            {
-                                if (_znetType.IsAssignableFrom(p.PropertyType) && p.GetIndexParameters().Length == 0)
-                                {
-                                    object val = p.GetValue(hInst, null);
                                     if (val != null) return val;
                                 }
                             }
@@ -271,35 +283,55 @@ namespace HeimdallWatchtower
 
             if (_getBiomeMethod == null)
             {
+                MethodInfo fallbackBiome = null;
                 foreach (var m in _worldGenType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
                 {
                     if (m.Name == "GetBiome")
                     {
                         var ps = m.GetParameters();
-                        if (ps.Length >= 2 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
+                        if (ps.Length == 2 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
                         {
                             _getBiomeMethod = m;
-                            _getBiomeParamCount = ps.Length;
+                            _getBiomeParamCount = 2;
                             break;
                         }
+                        if (ps.Length == 4 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
+                        {
+                            fallbackBiome = m;
+                        }
                     }
+                }
+                if (_getBiomeMethod == null && fallbackBiome != null)
+                {
+                    _getBiomeMethod = fallbackBiome;
+                    _getBiomeParamCount = 4;
                 }
             }
 
             if (_getHeightMethod == null)
             {
+                MethodInfo fallbackHeight = null;
                 foreach (var m in _worldGenType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
                 {
                     if (m.Name == "GetHeight")
                     {
                         var ps = m.GetParameters();
-                        if (ps.Length >= 2 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
+                        if (ps.Length == 2 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
                         {
                             _getHeightMethod = m;
-                            _getHeightParamCount = ps.Length;
+                            _getHeightParamCount = 2;
                             break;
                         }
+                        if (ps.Length == 3 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
+                        {
+                            fallbackHeight = m;
+                        }
                     }
+                }
+                if (_getHeightMethod == null && fallbackHeight != null)
+                {
+                    _getHeightMethod = fallbackHeight;
+                    _getHeightParamCount = 3;
                 }
             }
 
@@ -315,6 +347,24 @@ namespace HeimdallWatchtower
                 _heightBytes = new byte[GridSize * GridSize];
                 _terrainRow = 0;
             }
+
+            object[] bArgs = _getBiomeParamCount == 4
+                ? new object[] { 0f, 0f, 0.02f, false }
+                : new object[] { 0f, 0f };
+
+            object defaultThirdArg = null;
+            if (_getHeightParamCount == 3)
+            {
+                var pType = _getHeightMethod.GetParameters()[2].ParameterType;
+                if (pType.IsByRef) pType = pType.GetElementType();
+                if (pType != null && pType.IsValueType)
+                {
+                    try { defaultThirdArg = Activator.CreateInstance(pType); } catch { }
+                }
+            }
+            object[] hArgs = _getHeightParamCount == 3
+                ? new object[] { 0f, 0f, defaultThirdArg }
+                : new object[] { 0f, 0f };
 
             // Process 8 rows per Update frame (~1,600 samples/frame) so server tick is never delayed
             int rowsToProcess = 8;
@@ -333,15 +383,13 @@ namespace HeimdallWatchtower
                         continue;
                     }
 
-                    object[] bArgs = _getBiomeParamCount == 4
-                        ? new object[] { wx, wz, 0.02f, false }
-                        : new object[] { wx, wz };
+                    bArgs[0] = wx;
+                    bArgs[1] = wz;
                     int rawBiome = Convert.ToInt32(_getBiomeMethod.Invoke(wgInstance, bArgs));
                     _biomeBytes[idx] = MapBiomeEnumToCode(rawBiome);
 
-                    object[] hArgs = _getHeightParamCount == 3
-                        ? new object[] { wx, wz, null }
-                        : new object[] { wx, wz };
+                    hArgs[0] = wx;
+                    hArgs[1] = wz;
                     float rawH = Convert.ToSingle(_getHeightMethod.Invoke(wgInstance, hArgs));
                     // Sea level in Valheim is 30m. Map [10m..137.5m] -> [0..255], so sea level 30m == 40
                     int qH = (int)Math.Round((rawH - 10f) * 2f);
@@ -356,8 +404,10 @@ namespace HeimdallWatchtower
             if (_terrainRow >= GridSize)
             {
                 _terrainExported = true;
-                string worldName = _znetType.GetMethod("GetWorldName")?.Invoke(znetInstance, null) as string ?? "Dedicated";
-                var sb = new StringBuilder();
+                string worldName = InvokeMethod(_znetType, znetInstance, "GetWorldName", InstFlags) as string;
+                if (string.IsNullOrEmpty(worldName)) worldName = "Dedicated";
+
+                var sb = new StringBuilder(131072);
                 sb.Append("{\n");
                 sb.AppendFormat("  \"worldName\": \"{0}\",\n", EscapeJson(worldName));
                 sb.AppendFormat("  \"gridSize\": {0},\n", GridSize);
@@ -368,12 +418,23 @@ namespace HeimdallWatchtower
                 AppendZoneLandmarks(sb);
                 sb.Append("\n  ]\n}\n");
                 AtomicWriteText(TerrainOutputPath, sb.ToString());
+
+                // Free temporary grid buffers immediately
+                _biomeBytes = null;
+                _heightBytes = null;
                 Logger.LogInfo("[Heimdall Watchtower] Exported exact WorldGenerator terrain & biome map to " + TerrainOutputPath);
             }
         }
 
         private void AppendZoneLandmarks(StringBuilder sb)
         {
+            if (!string.IsNullOrEmpty(_cachedLandmarksJson))
+            {
+                sb.Append(_cachedLandmarksJson);
+                return;
+            }
+
+            var lsb = new StringBuilder(2048);
             bool first = true;
             int count = 0;
             try
@@ -389,8 +450,7 @@ namespace HeimdallWatchtower
                     object znetInst = GetStaticInstance(_znetType);
                     if (znetInst != null)
                     {
-                        zsInstance = _znetType.GetField("m_zoneSystem", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInst)
-                                  ?? _znetType.GetProperty("m_zoneSystem", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInst, null);
+                        zsInstance = GetMemberVal(_znetType, znetInst, "m_zoneSystem", InstFlags);
                     }
                 }
 
@@ -398,59 +458,55 @@ namespace HeimdallWatchtower
                 if (zsInstance != null)
                 {
                     const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.FlattenHierarchy;
+                    Type zsActualType = zsInstance.GetType();
                     foreach (var fieldName in new[] { "m_locationInstances", "locationInstances", "_locationInstances", "m_locations" })
                     {
                         try
                         {
-                            locDict = zsInstance.GetType().GetField(fieldName, flags)?.GetValue(zsInstance) as IDictionary
-                                   ?? zsInstance.GetType().GetProperty(fieldName, flags)?.GetValue(zsInstance, null) as IDictionary;
+                            locDict = GetMemberVal(zsActualType, zsInstance, fieldName, flags) as IDictionary;
                             if (locDict != null && locDict.Count > 0) break;
                         }
                         catch { }
                     }
                 }
 
-                if (locDict != null)
+                if (locDict != null && locDict.Count > 0)
                 {
-                    const BindingFlags memberFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
                     foreach (var val in locDict.Values)
                     {
                         if (val == null) continue;
                         var vType = val.GetType();
 
-                        object locObj = vType.GetField("m_location", memberFlags)?.GetValue(val)
-                                     ?? vType.GetProperty("m_location", memberFlags)?.GetValue(val, null);
-                        object posObj = vType.GetField("m_position", memberFlags)?.GetValue(val)
-                                     ?? vType.GetProperty("m_position", memberFlags)?.GetValue(val, null)
-                                     ?? vType.GetField("m_pos", memberFlags)?.GetValue(val);
+                        object locObj = GetMemberVal(vType, val, "m_location", InstFlags);
+                        object posObj = GetMemberVal(vType, val, "m_position", InstFlags);
+                        if (posObj == null) posObj = GetFieldVal(vType, val, "m_pos", InstFlags);
 
-                        if (!TryExtractVector3(posObj, out float x, out float _, out float z)) continue;
+                        float x, dummyY, z;
+                        if (!TryExtractVector3(posObj, out x, out dummyY, out z)) continue;
 
                         string prefabName = "";
                         if (locObj != null)
                         {
                             var lType = locObj.GetType();
-                            prefabName = lType.GetField("m_prefabName", memberFlags)?.GetValue(locObj) as string
-                                      ?? lType.GetProperty("m_prefabName", memberFlags)?.GetValue(locObj, null) as string
-                                      ?? lType.GetField("m_name", memberFlags)?.GetValue(locObj) as string
-                                      ?? lType.GetProperty("name", memberFlags)?.GetValue(locObj, null) as string
+                            prefabName = GetMemberVal(lType, locObj, "m_prefabName", InstFlags) as string
+                                      ?? GetFieldVal(lType, locObj, "m_name", InstFlags) as string
+                                      ?? GetPropVal(lType, locObj, "name", InstFlags) as string
                                       ?? "";
 
                             if (string.IsNullOrEmpty(prefabName))
                             {
-                                var prefabObj = lType.GetField("m_prefab", memberFlags)?.GetValue(locObj)
-                                             ?? lType.GetProperty("m_prefab", memberFlags)?.GetValue(locObj, null);
+                                var prefabObj = GetMemberVal(lType, locObj, "m_prefab", InstFlags);
                                 if (prefabObj != null)
                                 {
-                                    prefabName = prefabObj.GetType().GetProperty("name", memberFlags)?.GetValue(prefabObj, null) as string ?? "";
+                                    prefabName = GetPropVal(prefabObj.GetType(), prefabObj, "name", InstFlags) as string ?? "";
                                 }
                             }
                         }
 
                         if (string.IsNullOrEmpty(prefabName))
                         {
-                            prefabName = vType.GetField("m_prefabName", memberFlags)?.GetValue(val) as string
-                                      ?? vType.GetField("m_name", memberFlags)?.GetValue(val) as string
+                            prefabName = GetFieldVal(vType, val, "m_prefabName", InstFlags) as string
+                                      ?? GetFieldVal(vType, val, "m_name", InstFlags) as string
                                       ?? "";
                         }
                         if (string.IsNullOrEmpty(prefabName)) continue;
@@ -475,12 +531,12 @@ namespace HeimdallWatchtower
 
                         if (label == null) continue;
 
-                        if (!first) sb.Append(",\n");
+                        if (!first) lsb.Append(",\n");
                         first = false;
-                        sb.Append("    { ");
-                        sb.AppendFormat(CultureInfo.InvariantCulture, "\"id\": \"lm-{0}\", \"type\": \"{1}\", \"name\": \"{2}\", \"icon\": \"{3}\", \"biome\": \"{4}\", \"x\": {5:F0}, \"z\": {6:F0}",
+                        lsb.Append("    { ");
+                        lsb.AppendFormat(CultureInfo.InvariantCulture, "\"id\": \"lm-{0}\", \"type\": \"{1}\", \"name\": \"{2}\", \"icon\": \"{3}\", \"biome\": \"{4}\", \"x\": {5:F0}, \"z\": {6:F0}",
                             count++, ltype, EscapeJson(label), EscapeJson(icon), EscapeJson(biome), x, z);
-                        sb.Append(" }");
+                        lsb.Append(" }");
                         if (count >= 50) break;
                     }
                 }
@@ -490,9 +546,13 @@ namespace HeimdallWatchtower
                 // Ignore if ZoneSystem layout differs
             }
 
-            if (count == 0)
+            if (count > 0)
             {
-                if (!first) sb.Append(",\n");
+                _cachedLandmarksJson = lsb.ToString();
+                sb.Append(_cachedLandmarksJson);
+            }
+            else
+            {
                 sb.Append("    { \"id\": \"lm-0\", \"type\": \"spawn\", \"name\": \"Sacrificial Stones\", \"icon\": \"🏛️\", \"biome\": \"Meadows\", \"x\": 0, \"z\": 0 }");
             }
         }
@@ -527,8 +587,8 @@ namespace HeimdallWatchtower
             public bool Initialized;
         }
 
-        private readonly System.Collections.Generic.Dictionary<string, PeerVitalState> _vitalStates
-            = new System.Collections.Generic.Dictionary<string, PeerVitalState>();
+        private readonly Dictionary<string, PeerVitalState> _vitalStates
+            = new Dictionary<string, PeerVitalState>();
 
         private static int GetValheimStableHashCode(string str)
         {
@@ -548,39 +608,60 @@ namespace HeimdallWatchtower
         {
             x = 0f; y = 0f; z = 0f;
             if (vecObj == null) return false;
-            var t = vecObj.GetType();
-            var fx = t.GetField("x", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            var fy = t.GetField("y", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            var fz = t.GetField("z", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (fx != null && fy != null && fz != null)
+            if (vecObj is Vector3)
             {
-                x = Convert.ToSingle(fx.GetValue(vecObj));
-                y = Convert.ToSingle(fy.GetValue(vecObj));
-                z = Convert.ToSingle(fz.GetValue(vecObj));
+                Vector3 directVec = (Vector3)vecObj;
+                x = directVec.x;
+                y = directVec.y;
+                z = directVec.z;
+                return true;
+            }
+
+            var t = vecObj.GetType();
+            if (_cachedVecType != t)
+            {
+                _vecXField = t.GetField("x", InstFlags);
+                _vecYField = t.GetField("y", InstFlags);
+                _vecZField = t.GetField("z", InstFlags);
+                _cachedVecType = t;
+            }
+
+            if (_vecXField != null && _vecYField != null && _vecZField != null)
+            {
+                x = Convert.ToSingle(_vecXField.GetValue(vecObj));
+                y = Convert.ToSingle(_vecYField.GetValue(vecObj));
+                z = Convert.ToSingle(_vecZField.GetValue(vecObj));
                 return true;
             }
             return false;
         }
 
-        private static float ReadZdoFloat(object zdo, string keyName, float defaultVal)
+        private static void EnsureZdoReflectionCached(Type zdoType)
+        {
+            if (_cachedZdoType == zdoType) return;
+            _zdoGetFloatIntMethod = zdoType.GetMethod("GetFloat", new[] { typeof(int), typeof(float) });
+            _zdoGetFloatStrMethod = zdoType.GetMethod("GetFloat", new[] { typeof(string), typeof(float) });
+            _zdoGetPosMethod = zdoType.GetMethod("GetPosition", Type.EmptyTypes) ?? zdoType.GetMethod("GetPosition");
+            _zdoPosField = zdoType.GetField("m_position", InstFlags);
+            _cachedZdoType = zdoType;
+        }
+
+        private static float ReadZdoFloat(object zdo, int keyHash, string keyName, float defaultVal)
         {
             if (zdo == null) return defaultVal;
-            var zdoType = zdo.GetType();
+            EnsureZdoReflectionCached(zdo.GetType());
 
             // 1. Try ZDO.GetFloat(int hash, float defaultValue) — used by Valheim ZDOVars
-            var getFloatInt = zdoType.GetMethod("GetFloat", new[] { typeof(int), typeof(float) });
-            if (getFloatInt != null)
+            if (_zdoGetFloatIntMethod != null)
             {
-                int hash = GetValheimStableHashCode(keyName);
-                float val = Convert.ToSingle(getFloatInt.Invoke(zdo, new object[] { hash, defaultVal }));
+                float val = Convert.ToSingle(_zdoGetFloatIntMethod.Invoke(zdo, new object[] { keyHash, defaultVal }));
                 if (Math.Abs(val - defaultVal) > 0.001f) return val;
             }
 
             // 2. Try ZDO.GetFloat(string name, float defaultValue)
-            var getFloatStr = zdoType.GetMethod("GetFloat", new[] { typeof(string), typeof(float) });
-            if (getFloatStr != null)
+            if (_zdoGetFloatStrMethod != null)
             {
-                float val = Convert.ToSingle(getFloatStr.Invoke(zdo, new object[] { keyName, defaultVal }));
+                float val = Convert.ToSingle(_zdoGetFloatStrMethod.Invoke(zdo, new object[] { keyName, defaultVal }));
                 if (Math.Abs(val - defaultVal) > 0.001f) return val;
             }
 
@@ -603,33 +684,35 @@ namespace HeimdallWatchtower
                 return;
             }
 
-            var zdoManInstance = GetStaticInstance(_zdoManType)
-                              ?? _znetType.GetField("m_zdoMan", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInstance)
-                              ?? _znetType.GetProperty("m_zdoMan", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInstance, null);
+            var zdoManInstance = GetMemberVal(_znetType, znetInstance, "m_zdoMan", InstFlags)
+                              ?? GetStaticInstance(_zdoManType);
 
-            string worldName = _znetType.GetMethod("GetWorldName")?.Invoke(znetInstance, null) as string ?? "Dedicated";
-            var peersObj = _znetType.GetMethod("GetPeers", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.Invoke(znetInstance, null) as IEnumerable
-                        ?? _znetType.GetField("m_peers", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(znetInstance) as IEnumerable;
+            string worldName = InvokeMethod(_znetType, znetInstance, "GetWorldName", InstFlags) as string;
+            if (string.IsNullOrEmpty(worldName)) worldName = "Dedicated";
+
+            var peersObj = InvokeMethod(_znetType, znetInstance, "GetPeers", InstFlags) as IEnumerable
+                        ?? GetFieldVal(_znetType, znetInstance, "m_peers", InstFlags) as IEnumerable;
 
             // Query ZNet.GetPlayerList() as an authoritative coordinate source
-            var playerListPositions = new System.Collections.Generic.Dictionary<string, UnityEngine.Vector3>(StringComparer.OrdinalIgnoreCase);
+            var playerListPositions = new Dictionary<string, Vector3>(StringComparer.OrdinalIgnoreCase);
             IEnumerable playerListObj = null;
             try
             {
-                playerListObj = _znetType.GetMethod("GetPlayerList", BindingFlags.Public | BindingFlags.Instance)?.Invoke(znetInstance, null) as IEnumerable;
+                playerListObj = InvokeMethod(_znetType, znetInstance, "GetPlayerList", BindingFlags.Public | BindingFlags.Instance) as IEnumerable;
                 if (playerListObj != null)
                 {
                     foreach (var pi in playerListObj)
                     {
                         if (pi == null) continue;
                         var piType = pi.GetType();
-                        string piName = piType.GetField("m_name", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pi) as string;
-                        object piPosObj = piType.GetField("m_position", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pi);
-                        if (!string.IsNullOrEmpty(piName) && TryExtractVector3(piPosObj, out float px, out float py, out float pz))
+                        string piName = GetFieldVal(piType, pi, "m_name", InstFlags) as string;
+                        object piPosObj = GetFieldVal(piType, pi, "m_position", InstFlags);
+                        float px, py, pz;
+                        if (!string.IsNullOrEmpty(piName) && TryExtractVector3(piPosObj, out px, out py, out pz))
                         {
                             if (px != 0f || pz != 0f)
                             {
-                                playerListPositions[piName] = new UnityEngine.Vector3 { x = px, y = py, z = pz };
+                                playerListPositions[piName] = new Vector3 { x = px, y = py, z = pz };
                             }
                         }
                     }
@@ -640,31 +723,32 @@ namespace HeimdallWatchtower
                 // Ignore transient reflection issue with PlayerInfo
             }
 
-            // Find ZDOMan.GetZDO(ZDOID) without depending on which assembly defines struct ZDOID
-            MethodInfo getZdoMethod = null;
-            if (_zdoManType != null)
+            // Cache ZDOMan.GetZDO(ZDOID) once without depending on which assembly defines struct ZDOID
+            if (!_getZdoMethodSearched && _zdoManType != null)
             {
-                foreach (var m in _zdoManType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+                _getZdoMethodSearched = true;
+                foreach (var m in _zdoManType.GetMethods(InstFlags))
                 {
                     if (m.Name == "GetZDO" && m.GetParameters().Length == 1)
                     {
-                        getZdoMethod = m;
+                        _getZdoMethod = m;
                         break;
                     }
                 }
             }
 
-            var sb = new StringBuilder();
+            var sb = new StringBuilder(4096);
             sb.Append("{\n");
             sb.Append("  \"pluginStatus\": \"active\",\n");
             sb.Append("  \"pluginVersion\": \"1.5.0\",\n");
             sb.AppendFormat("  \"worldName\": \"{0}\",\n", EscapeJson(worldName));
-            sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
-            sb.AppendFormat("  \"timestamp\": \"{0}\",\n", DateTime.UtcNow.ToString("o"));
+            string nowIso = DateTime.UtcNow.ToString("o");
+            sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", nowIso);
+            sb.AppendFormat("  \"timestamp\": \"{0}\",\n", nowIso);
             sb.Append("  \"players\": [\n");
 
             bool first = true;
-            var processedNames = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var processedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (peersObj != null)
             {
                 foreach (var peer in peersObj)
@@ -672,28 +756,31 @@ namespace HeimdallWatchtower
                     if (peer == null) continue;
                     var peerType = peer.GetType();
 
-                    string playerName = peerType.GetField("m_playerName", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(peer) as string ?? "Viking";
-                    object refPosObj = peerType.GetMethod("GetRefPos", BindingFlags.Public | BindingFlags.Instance)?.Invoke(peer, null)
-                                    ?? peerType.GetField("m_refPos", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(peer);
-                    object charIdObj = peerType.GetField("m_characterID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(peer);
+                    string playerName = GetFieldVal(peerType, peer, "m_playerName", InstFlags) as string;
+                    if (string.IsNullOrEmpty(playerName)) playerName = "Viking";
+
+                    object refPosObj = InvokeMethod(peerType, peer, "GetRefPos", BindingFlags.Public | BindingFlags.Instance)
+                                    ?? GetFieldVal(peerType, peer, "m_refPos", InstFlags);
+                    object charIdObj = GetFieldVal(peerType, peer, "m_characterID", InstFlags);
 
                     float x = 0f, y = 0f, z = 0f;
-                    if (TryExtractVector3(refPosObj, out float rx, out float ry, out float rz) && (rx != 0f || rz != 0f))
+                    float rx, ry, rz;
+                    if (TryExtractVector3(refPosObj, out rx, out ry, out rz) && (rx != 0f || rz != 0f))
                     {
                         x = rx; y = ry; z = rz;
                     }
 
                     string steamId = "";
-                    object socketObj = peerType.GetField("m_socket", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(peer);
+                    object socketObj = GetFieldVal(peerType, peer, "m_socket", InstFlags);
                     if (socketObj != null)
                     {
-                        steamId = socketObj.GetType().GetMethod("GetHostName")?.Invoke(socketObj, null) as string ?? "";
+                        steamId = InvokeMethod(socketObj.GetType(), socketObj, "GetHostName", InstFlags) as string ?? "";
                     }
                     if (string.IsNullOrEmpty(steamId))
                     {
                         try
                         {
-                            object uidObj = peerType.GetField("m_uid", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(peer);
+                            object uidObj = GetFieldVal(peerType, peer, "m_uid", InstFlags);
                             if (uidObj != null)
                             {
                                 long uid = Convert.ToInt64(uidObj);
@@ -710,27 +797,28 @@ namespace HeimdallWatchtower
                     float rawMaxStamina = -1f;
                     float zdoNoise = 0f;
 
-                    if (charIdObj != null && getZdoMethod != null)
+                    if (charIdObj != null && _getZdoMethod != null && zdoManInstance != null)
                     {
                         try
                         {
-                            object zdo = getZdoMethod.Invoke(zdoManInstance, new[] { charIdObj });
+                            object zdo = _getZdoMethod.Invoke(zdoManInstance, new[] { charIdObj });
                             if (zdo != null)
                             {
-                                var zdoType = zdo.GetType();
-                                object zdoPos = zdoType.GetMethod("GetPosition", Type.EmptyTypes)?.Invoke(zdo, null)
-                                             ?? zdoType.GetMethod("GetPosition")?.Invoke(zdo, null)
-                                             ?? zdoType.GetField("m_position", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(zdo);
-                                if (TryExtractVector3(zdoPos, out float zx, out float zy, out float zz) && (zx != 0f || zz != 0f))
+                                EnsureZdoReflectionCached(zdo.GetType());
+                                object zdoPos = _zdoGetPosMethod != null ? _zdoGetPosMethod.Invoke(zdo, null) : null;
+                                if (zdoPos == null && _zdoPosField != null) zdoPos = _zdoPosField.GetValue(zdo);
+
+                                float zx, zy, zz;
+                                if (TryExtractVector3(zdoPos, out zx, out zy, out zz) && (zx != 0f || zz != 0f))
                                 {
                                     x = zx; y = zy; z = zz;
                                 }
 
-                                rawHp = ReadZdoFloat(zdo, "health", -1f);
-                                rawMaxHp = ReadZdoFloat(zdo, "max_health", -1f);
-                                rawStamina = ReadZdoFloat(zdo, "stamina", -1f);
-                                rawMaxStamina = ReadZdoFloat(zdo, "max_stamina", -1f);
-                                zdoNoise = ReadZdoFloat(zdo, "noise", 0f);
+                                rawHp = ReadZdoFloat(zdo, HashHealth, "health", -1f);
+                                rawMaxHp = ReadZdoFloat(zdo, HashMaxHealth, "max_health", -1f);
+                                rawStamina = ReadZdoFloat(zdo, HashStamina, "stamina", -1f);
+                                rawMaxStamina = ReadZdoFloat(zdo, HashMaxStamina, "max_stamina", -1f);
+                                zdoNoise = ReadZdoFloat(zdo, HashNoise, "noise", 0f);
                             }
                         }
                         catch
@@ -740,7 +828,8 @@ namespace HeimdallWatchtower
                     }
 
                     // Fallback to GetPlayerList if peer position is (0, 0)
-                    if (x == 0f && z == 0f && playerListPositions.TryGetValue(playerName, out var pPos))
+                    Vector3 pPos;
+                    if (x == 0f && z == 0f && playerListPositions.TryGetValue(playerName, out pPos))
                     {
                         x = pPos.x; y = pPos.y; z = pPos.z;
                     }
@@ -754,6 +843,7 @@ namespace HeimdallWatchtower
                     PeerVitalState pState;
                     if (!_vitalStates.TryGetValue(stateKey, out pState))
                     {
+                        if (_vitalStates.Count > 64) _vitalStates.Clear();
                         pState = new PeerVitalState();
                         _vitalStates[stateKey] = pState;
                     }
@@ -881,37 +971,38 @@ namespace HeimdallWatchtower
                 {
                     if (pi == null) continue;
                     var piType = pi.GetType();
-                    string piName = piType.GetField("m_name", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pi) as string;
+                    string piName = GetFieldVal(piType, pi, "m_name", InstFlags) as string;
                     if (string.IsNullOrEmpty(piName) || processedNames.Contains(piName)) continue;
                     processedNames.Add(piName);
 
-                    object piPosObj = piType.GetField("m_position", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pi);
-                    object piCharIdObj = piType.GetField("m_characterID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(pi);
+                    object piPosObj = GetFieldVal(piType, pi, "m_position", InstFlags);
+                    object piCharIdObj = GetFieldVal(piType, pi, "m_characterID", InstFlags);
 
                     float px = 0f, py = 0f, pz = 0f;
                     TryExtractVector3(piPosObj, out px, out py, out pz);
 
                     float rawHp = -1f, rawMaxHp = -1f, rawStamina = -1f, rawMaxStamina = -1f, zdoNoise = 0f;
-                    if (piCharIdObj != null && getZdoMethod != null && zdoManInstance != null)
+                    if (piCharIdObj != null && _getZdoMethod != null && zdoManInstance != null)
                     {
                         try
                         {
-                            object zdo = getZdoMethod.Invoke(zdoManInstance, new[] { piCharIdObj });
+                            object zdo = _getZdoMethod.Invoke(zdoManInstance, new[] { piCharIdObj });
                             if (zdo != null)
                             {
-                                var zdoType = zdo.GetType();
-                                object zdoPos = zdoType.GetMethod("GetPosition", Type.EmptyTypes)?.Invoke(zdo, null)
-                                             ?? zdoType.GetMethod("GetPosition")?.Invoke(zdo, null)
-                                             ?? zdoType.GetField("m_position", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)?.GetValue(zdo);
-                                if (TryExtractVector3(zdoPos, out float zx, out float zy, out float zz) && (zx != 0f || zz != 0f))
+                                EnsureZdoReflectionCached(zdo.GetType());
+                                object zdoPos = _zdoGetPosMethod != null ? _zdoGetPosMethod.Invoke(zdo, null) : null;
+                                if (zdoPos == null && _zdoPosField != null) zdoPos = _zdoPosField.GetValue(zdo);
+
+                                float zx, zy, zz;
+                                if (TryExtractVector3(zdoPos, out zx, out zy, out zz) && (zx != 0f || zz != 0f))
                                 {
                                     px = zx; py = zy; pz = zz;
                                 }
-                                rawHp = ReadZdoFloat(zdo, "health", -1f);
-                                rawMaxHp = ReadZdoFloat(zdo, "max_health", -1f);
-                                rawStamina = ReadZdoFloat(zdo, "stamina", -1f);
-                                rawMaxStamina = ReadZdoFloat(zdo, "max_stamina", -1f);
-                                zdoNoise = ReadZdoFloat(zdo, "noise", 0f);
+                                rawHp = ReadZdoFloat(zdo, HashHealth, "health", -1f);
+                                rawMaxHp = ReadZdoFloat(zdo, HashMaxHealth, "max_health", -1f);
+                                rawStamina = ReadZdoFloat(zdo, HashStamina, "stamina", -1f);
+                                rawMaxStamina = ReadZdoFloat(zdo, HashMaxStamina, "max_stamina", -1f);
+                                zdoNoise = ReadZdoFloat(zdo, HashNoise, "noise", 0f);
                             }
                         }
                         catch { }
@@ -990,7 +1081,13 @@ namespace HeimdallWatchtower
 
         private static string EscapeJson(string s)
         {
-            return (s ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"");
+            if (string.IsNullOrEmpty(s)) return "";
+            return s
+                .Replace("\\", "\\\\")
+                .Replace("\"", "\\\"")
+                .Replace("\r", " ")
+                .Replace("\n", " ")
+                .Replace("\t", " ");
         }
     }
 }

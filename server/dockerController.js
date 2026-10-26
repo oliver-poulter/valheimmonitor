@@ -16,6 +16,10 @@ class DockerController {
     this.containerId = null;
     this.containerName = TARGET_CONTAINER;
     this.logStreamReq = null;
+    this.logReconnectTimer = null;
+    this.isPollingMetrics = false;
+    this.isAutoConfiguring = false;
+    this.hasScannedHistoricalLogs = false;
 
     // Telemetry ring buffer (last 40 samples)
     this.telemetryHistory = [];
@@ -71,19 +75,17 @@ class DockerController {
         if (process.env.AUTO_CONFIGURE_SERVER !== 'false') {
           setTimeout(async () => {
             try {
-              const liveMapPath = path.join(this.configManager.watchtowerDir, 'live_map.json');
-              let alreadyConfigured = false;
-              if (fs.existsSync(liveMapPath)) {
-                const parsed = JSON.parse(fs.readFileSync(liveMapPath, 'utf8'));
-                if (parsed && parsed.pluginVersion === '1.5.0' && parsed.pluginStatus === 'active') {
-                  alreadyConfigured = true;
-                }
-              }
-
-              // Also check inside valheim-server container if SpreadTheLoad.dll is present
+              // Check inside valheim-server container if BepInEx and all performance plugins are already installed
               let containerMissingMods = false;
               try {
-                const checkRes = await this.execInContainer(['/bin/bash', '-c', 'test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && test -f /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll && echo "PRESENT"']);
+                const checkRes = await this.execInContainer(
+                  [
+                    '/bin/bash',
+                    '-c',
+                    'grep -q \'^export BEPINEX="true"\' /usr/local/etc/valheim/defaults 2>/dev/null && test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && test -f /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll && echo "PRESENT"'
+                  ],
+                  10000
+                );
                 if (!checkRes || !checkRes.includes('PRESENT')) {
                   containerMissingMods = true;
                 }
@@ -92,10 +94,11 @@ class DockerController {
               }
 
               // SEAMLESS AUTO-MIGRATION:
-              // If an existing deployment is missing ANY performance mod, trigger autoConfigureValheimServer automatically!
-              if (!alreadyConfigured || newlyDeployedMods || containerMissingMods) {
-                console.log(`[Performance Suite Migration] Deploying mods (${BUNDLED_PERFORMANCE_PLUGINS.map(m => m.title).join(', ')})...`);
-                this.autoConfigureValheimServer({ forceRestart: true }).catch((err) => {
+              // Only run autoConfigureValheimServer if mods were newly deployed or missing in container,
+              // and pass forceRestart: false so we only restart valheim-server if files actually changed.
+              if (newlyDeployedMods || containerMissingMods) {
+                console.log(`[Performance Suite Migration] Deploying mods (${BUNDLED_PERFORMANCE_PLUGINS.map((m) => m.title).join(', ')})...`);
+                this.autoConfigureValheimServer({ forceRestart: false }).catch((err) => {
                   console.error('[Performance Suite Migration] Auto-configure error:', err.message);
                 });
               }
@@ -161,135 +164,166 @@ class DockerController {
    * 4. Copies all plugins into /opt/valheim/bepinex/BepInEx/plugins/ and gracefully restarts valheim-server
    */
   async autoConfigureValheimServer({ forceRestart = true } = {}) {
-    this.deployBundledBepInExPlugin();
-    const timestamp = new Date().toISOString();
-
-    if (!this.socketAvailable || !this.containerId) {
-      this.currentStatus.autoConfigState = 'configured';
+    if (this.isAutoConfiguring) {
       return {
         ok: true,
-        output: '[Preview Mode] Deployed Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter) to /config/bepinex/plugins/',
-        message: 'Deployed Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter) to /config/bepinex/plugins/ (Preview Mode).'
+        output: 'Auto-configuration is already in progress.',
+        message: 'Auto-configuration is already running in the background.'
       };
     }
 
-    this.currentStatus.autoConfigState = 'configuring';
-    const setupScript = `
-      set -e
-      echo "[1/5] Creating /config/bepinex/plugins and /config/watchtower..."
-      mkdir -p /config/bepinex/plugins /config/watchtower
-      chmod -R 777 /config/watchtower /config/bepinex || true
-      NEEDS_RESTART=0
-
-      echo "[2/5] Creating mandatory safety backup of world save via valheim-backup..."
-      supervisorctl start valheim-backup >/dev/null 2>&1 || true
-
-      # Wait up to 45s if valheim-updater is currently mid-download
-      for i in $(seq 1 15); do
-        if [ -f /opt/valheim/server/valheim_server.x86_64 ]; then
-          break
-        fi
-        sleep 3
-      done
-
-      echo "[3/5] Enabling BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults..."
-      if ! grep -q '^export BEPINEX="true"' /usr/local/etc/valheim/defaults 2>/dev/null; then
-        sed -i '/BEPINEX=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
-        sed -i '/STATUS_HTTP=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
-        echo "" >> /usr/local/etc/valheim/defaults
-        echo 'export BEPINEX="true"' >> /usr/local/etc/valheim/defaults
-        echo 'export STATUS_HTTP="true"' >> /usr/local/etc/valheim/defaults
-        NEEDS_RESTART=1
-      fi
-
-      echo "[4/5] Checking BepInEx installation in /opt/valheim/bepinex..."
-      export BEPINEX=true
-      if [ ! -f /opt/valheim/bepinex/valheim_server.x86_64 ] || [ ! -d /opt/valheim/bepinex/BepInEx ]; then
-        echo "Signaling /opt/valheim/dl/bepinex/merge & running /usr/local/bin/bepinex-updater..."
-        mkdir -p /opt/valheim/dl/bepinex
-        touch /opt/valheim/dl/bepinex/merge
-        export DEBUG_REINSTALL_BEPINEX=true
-        /usr/local/bin/bepinex-updater || true
-        NEEDS_RESTART=1
-      fi
-
-      mkdir -p /opt/valheim/bepinex/BepInEx/plugins /config/bepinex/plugins /config/bepinex/config
-      if [ -d /config/bepinex/plugins ]; then
-        cp -f /config/bepinex/plugins/*.dll /opt/valheim/bepinex/BepInEx/plugins/ 2>/dev/null || true
-        echo "Installed & synchronized performance suite into /opt/valheim/bepinex/BepInEx/plugins/"
-      fi
-
-      # Symlink LogOutput.log and config directory so Watchtower can inspect live logs & configs directly in /config/bepinex/
-      touch /opt/valheim/bepinex/BepInEx/LogOutput.log 2>/dev/null || true
-      ln -sfn /opt/valheim/bepinex/BepInEx/LogOutput.log /config/bepinex/LogOutput.log 2>/dev/null || true
-      cp -rn /opt/valheim/bepinex/BepInEx/config/* /config/bepinex/config/ 2>/dev/null || true
-
-      # Ensure non-root Valheim server user (PUID/PGID) owns BepInEx and can write to /config/watchtower
-      TARGET_UID=\${PUID:-3001}
-      TARGET_GID=\${PGID:-999}
-      chown -R "\$TARGET_UID:\$TARGET_GID" /opt/valheim/bepinex /config/bepinex /config/watchtower 2>/dev/null || true
-      chmod -R 777 /config/watchtower 2>/dev/null || true
-
-      if [ "${forceRestart ? '1' : '0'}" = "1" ] || [ "$NEEDS_RESTART" = "1" ]; then
-        echo "[5/5] Gracefully restarting valheim-server with Performance Suite enabled..."
-        supervisorctl restart valheim-server || true
-        echo "RESTARTED_WITH_BEPINEX"
-      else
-        echo "[5/5] BepInEx and Performance Suite already active."
-        echo "ALREADY_CONFIGURED"
-      fi
-    `;
-
-    // Write immediate bootstrap status to /config/watchtower/live_map.json so UI reflects progress right away
+    this.isAutoConfiguring = true;
     try {
-      const liveMapPath = path.join(this.configManager.watchtowerDir, 'live_map.json');
-      fs.writeFileSync(
-        liveMapPath,
-        JSON.stringify(
-          {
-            pluginStatus: 'configuring_and_restarting_server',
-            pluginVersion: '1.5.0',
-            worldName: this.configManager.state.serverMeta.worldName || 'Dedicated',
-            lastUpdated: timestamp,
-            players: []
-          },
-          null,
-          2
-        ),
-        'utf8'
-      );
-      this.configManager.applyOwnership(liveMapPath);
-    } catch (_) {}
+      this.deployBundledBepInExPlugin();
+      const timestamp = new Date().toISOString();
 
-    // Allow up to 180s (3 minutes) for backup + BepInEx download + rsync + graceful server restart
-    const out = await this.execInContainer(['/bin/bash', '-c', setupScript], 180000);
-    this.currentStatus.autoConfigState = 'configured';
-    this.currentStatus.envConfig.BEPINEX = 'true';
-    this.currentStatus.envConfig.STATUS_HTTP = 'true';
+      if (!this.socketAvailable || !this.containerId) {
+        this.currentStatus.autoConfigState = 'configured';
+        return {
+          ok: true,
+          output: '[Preview Mode] Deployed Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter) to /config/bepinex/plugins/',
+          message: 'Deployed Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter) to /config/bepinex/plugins/ (Preview Mode).'
+        };
+      }
 
-    this.logParser.addEvent({
-      type: 'system',
-      timestamp,
-      title: 'Performance Suite & BepInEx Configured (Safety Backup Created)',
-      detail: out.includes('RESTARTED_WITH_BEPINEX')
-        ? 'Created safety backup -> Installed SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter -> Gracefully restarted'
-        : 'Verified Performance Suite & BepInEx active'
-    });
+      this.currentStatus.autoConfigState = 'configuring';
+      const setupScript = `
+        set -e
+        echo "[1/5] Creating /config/bepinex/plugins and /config/watchtower..."
+        mkdir -p /config/bepinex/plugins /config/watchtower
+        chmod -R 777 /config/watchtower /config/bepinex || true
+        NEEDS_RESTART=0
 
-    return {
-      ok: true,
-      output: out,
-      message: out.includes('RESTARTED_WITH_BEPINEX')
-        ? 'Safety backup created, Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter) installed, and server restarted! (Valheim takes ~45-60s to load the world).'
-        : 'Server is configured with Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter)!'
-    };
+        # Wait up to 45s if valheim-updater is currently mid-download
+        for i in $(seq 1 15); do
+          if [ -f /opt/valheim/server/valheim_server.x86_64 ]; then
+            break
+          fi
+          sleep 3
+        done
+
+        echo "[2/5] Enabling BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults..."
+        if ! grep -q '^export BEPINEX="true"' /usr/local/etc/valheim/defaults 2>/dev/null; then
+          sed -i '/BEPINEX=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
+          sed -i '/STATUS_HTTP=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
+          echo "" >> /usr/local/etc/valheim/defaults
+          echo 'export BEPINEX="true"' >> /usr/local/etc/valheim/defaults
+          echo 'export STATUS_HTTP="true"' >> /usr/local/etc/valheim/defaults
+          NEEDS_RESTART=1
+        fi
+
+        echo "[3/5] Checking BepInEx installation in /opt/valheim/bepinex..."
+        export BEPINEX=true
+        if [ ! -f /opt/valheim/bepinex/valheim_server.x86_64 ] || [ ! -d /opt/valheim/bepinex/BepInEx ]; then
+          echo "Signaling /opt/valheim/dl/bepinex/merge & running /usr/local/bin/bepinex-updater..."
+          mkdir -p /opt/valheim/dl/bepinex
+          touch /opt/valheim/dl/bepinex/merge
+          export DEBUG_REINSTALL_BEPINEX=true
+          /usr/local/bin/bepinex-updater || true
+          NEEDS_RESTART=1
+        fi
+
+        mkdir -p /opt/valheim/bepinex/BepInEx/plugins /config/bepinex/plugins /config/bepinex/config
+        if [ -d /config/bepinex/plugins ]; then
+          for dll in /config/bepinex/plugins/*.dll; do
+            [ -f "$dll" ] || continue
+            base=$(basename "$dll")
+            dest="/opt/valheim/bepinex/BepInEx/plugins/$base"
+            if [ ! -f "$dest" ] || ! cmp -s "$dll" "$dest"; then
+              cp -f "$dll" "$dest" 2>/dev/null || true
+              NEEDS_RESTART=1
+            fi
+          done
+          echo "[4/5] Synchronized performance suite into /opt/valheim/bepinex/BepInEx/plugins/"
+        fi
+
+        # Symlink LogOutput.log and config directory so Watchtower can inspect live logs & configs directly in /config/bepinex/
+        touch /opt/valheim/bepinex/BepInEx/LogOutput.log 2>/dev/null || true
+        ln -sfn /opt/valheim/bepinex/BepInEx/LogOutput.log /config/bepinex/LogOutput.log 2>/dev/null || true
+        cp -rn /opt/valheim/bepinex/BepInEx/config/* /config/bepinex/config/ 2>/dev/null || true
+
+        # Ensure non-root Valheim server user (PUID/PGID) owns BepInEx and can write to /config/watchtower
+        TARGET_UID=\${PUID:-3001}
+        TARGET_GID=\${PGID:-999}
+        chown -R "\$TARGET_UID:\$TARGET_GID" /opt/valheim/bepinex /config/bepinex /config/watchtower 2>/dev/null || true
+        chmod -R 777 /config/watchtower 2>/dev/null || true
+
+        if [ "${forceRestart ? '1' : '0'}" = "1" ] || [ "$NEEDS_RESTART" = "1" ]; then
+          echo "[5/5] Creating safety backup & gracefully restarting valheim-server..."
+          supervisorctl start valheim-backup >/dev/null 2>&1 || true
+          supervisorctl restart valheim-server || true
+          echo "RESTARTED_WITH_BEPINEX"
+        else
+          echo "[5/5] BepInEx and Performance Suite already active."
+          echo "ALREADY_CONFIGURED"
+        fi
+      `;
+
+      if (forceRestart) {
+        try {
+          const liveMapPath = path.join(this.configManager.watchtowerDir, 'live_map.json');
+          fs.writeFileSync(
+            liveMapPath,
+            JSON.stringify(
+              {
+                pluginStatus: 'configuring_and_restarting_server',
+                pluginVersion: '1.5.0',
+                worldName: this.configManager.state.serverMeta.worldName || 'Dedicated',
+                lastUpdated: timestamp,
+                players: []
+              },
+              null,
+              2
+            ),
+            'utf8'
+          );
+          this.configManager.applyOwnership(liveMapPath);
+        } catch (_) {}
+      }
+
+      // Allow up to 180s (3 minutes) for backup + BepInEx download + rsync + graceful server restart
+      const out = await this.execInContainer(['/bin/bash', '-c', setupScript], 180000);
+      this.currentStatus.autoConfigState = 'configured';
+      this.currentStatus.envConfig.BEPINEX = 'true';
+      this.currentStatus.envConfig.STATUS_HTTP = 'true';
+
+      this.logParser.addEvent({
+        type: 'system',
+        timestamp,
+        title: 'Performance Suite & BepInEx Configured',
+        detail: out.includes('RESTARTED_WITH_BEPINEX')
+          ? 'Created safety backup -> Installed SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter -> Gracefully restarted'
+          : 'Verified Performance Suite & BepInEx active'
+      });
+
+      return {
+        ok: true,
+        output: out,
+        message: out.includes('RESTARTED_WITH_BEPINEX')
+          ? 'Safety backup created, Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter) installed, and server restarted! (Valheim takes ~45-60s to load the world).'
+          : 'Server is configured with Performance Suite (SpreadTheLoad, BetterNetworking, ServerDevcommands, WatchtowerMapExporter)!'
+      };
+    } finally {
+      this.isAutoConfiguring = false;
+    }
   }
 
   /**
-   * Low-level HTTP request over /var/run/docker.sock
+   * Low-level HTTP request over /var/run/docker.sock with full stream error protection
    */
   dockerRequest(method, apiPath, body = null, timeout = 8000) {
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let timer = null;
+
+      const finish = (err, val) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (err) reject(err);
+        else resolve(val);
+      };
+
       const payload = body ? JSON.stringify(body) : null;
       const req = http.request(
         {
@@ -306,25 +340,45 @@ class DockerController {
         },
         (res) => {
           const chunks = [];
-          res.on('data', (chunk) => chunks.push(chunk));
+          let totalBytes = 0;
+          const maxBytes = 2 * 1024 * 1024; // 2 MB cap to prevent OOM
+
+          res.on('data', (chunk) => {
+            if (totalBytes < maxBytes) {
+              chunks.push(chunk);
+              totalBytes += chunk.length;
+            }
+          });
+          res.on('error', (err) => finish(err));
           res.on('end', () => {
             const raw = Buffer.concat(chunks).toString('utf8');
             if (res.statusCode >= 400) {
-              return reject(new Error(`Docker API ${res.statusCode}: ${raw}`));
+              return finish(new Error(`Docker API ${res.statusCode}: ${raw}`));
             }
             try {
-              resolve(raw ? JSON.parse(raw) : {});
+              finish(null, raw ? JSON.parse(raw) : {});
             } catch (_) {
-              resolve(raw);
+              finish(null, raw);
             }
           });
         }
       );
-      req.on('error', reject);
+
+      timer = setTimeout(() => {
+        try {
+          req.destroy();
+        } catch (_) {}
+        finish(new Error('Docker socket request timed out'));
+      }, timeout);
+
+      req.on('error', (err) => finish(err));
       req.on('timeout', () => {
-        req.destroy();
-        reject(new Error('Docker socket request timed out'));
+        try {
+          req.destroy();
+        } catch (_) {}
+        finish(new Error('Docker socket request timed out'));
       });
+
       if (payload) req.write(payload);
       req.end();
     });
@@ -363,7 +417,21 @@ class DockerController {
     if (!this.socketAvailable || !this.containerId) return this.currentStatus;
 
     try {
-      const inspect = await this.dockerRequest('GET', `/containers/${this.containerId}/json`);
+      let inspect;
+      try {
+        inspect = await this.dockerRequest('GET', `/containers/${this.containerId}/json`, null, 6000);
+      } catch (err) {
+        // If container was recreated with a new ID, re-discover it
+        const prevId = this.containerId;
+        const found = await this.findValheimContainer();
+        if (found && this.containerId !== prevId) {
+          this.attachContainerLogs({ isReconnect: true });
+          inspect = await this.dockerRequest('GET', `/containers/${this.containerId}/json`, null, 6000);
+        } else {
+          throw err;
+        }
+      }
+
       const isRunning = inspect.State && inspect.State.Running;
       this.currentStatus.state = isRunning ? 'running' : (inspect.State && inspect.State.Status) || 'stopped';
       this.currentStatus.startedAt = (inspect.State && inspect.State.StartedAt) || this.currentStatus.startedAt;
@@ -400,7 +468,7 @@ class DockerController {
 
       // Fetch container stats if running
       if (isRunning) {
-        const stats = await this.dockerRequest('GET', `/containers/${this.containerId}/stats?stream=false`, null, 4000);
+        const stats = await this.dockerRequest('GET', `/containers/${this.containerId}/stats?stream=false`, null, 6500);
         if (stats && stats.cpu_stats && stats.precpu_stats) {
           const cpuDelta =
             (stats.cpu_stats.cpu_usage.total_usage || 0) -
@@ -432,11 +500,11 @@ class DockerController {
           this.currentStatus.netTxMb = Number((tx / (1024 * 1024)).toFixed(1));
         }
 
-        // Also check supervisorctl status every 12s (every 3rd poll) to prevent unnecessary exec churn
+        // Check supervisorctl status every 20s (every 5th poll) with a 5s command timeout inside container
         this.supervisorPollCount = (this.supervisorPollCount || 0) + 1;
-        if (this.supervisorPollCount % 3 === 0) {
+        if (this.supervisorPollCount % 5 === 0) {
           try {
-            const supOut = await this.execInContainer(['supervisorctl', 'status']);
+            const supOut = await this.execInContainer(['timeout', '5', 'supervisorctl', 'status'], 6500);
             if (supOut) {
               const services = [];
               for (const line of supOut.split(/\r?\n/)) {
@@ -493,24 +561,32 @@ class DockerController {
    * Streams historical + live logs from the valheim-server container
    * and scans rotated /var/log/supervisor/valheim-server* logs for past sessions
    */
-  async attachContainerLogs() {
+  async attachContainerLogs({ isReconnect = false } = {}) {
     if (!this.socketAvailable || !this.containerId) return;
+    if (this.logReconnectTimer) {
+      clearTimeout(this.logReconnectTimer);
+      this.logReconnectTimer = null;
+    }
     if (this.logStreamReq) {
       try {
         this.logStreamReq.destroy();
       } catch (_) {}
+      this.logStreamReq = null;
     }
 
-    // 1. Scan rotated supervisor logs inside lloesche/valheim-server for historical sessions
-    // Only if players state is not already persisted, avoiding slow startup greps
+    // 1. Scan rotated supervisor logs inside lloesche/valheim-server for historical sessions once on first boot
     try {
       const hasKnownPlayers = Object.keys(this.configManager.state.players || {}).length > 0;
-      if (!hasKnownPlayers) {
-        const histOut = await this.execInContainer([
-          'sh',
-          '-c',
-          'grep -hE "Got handshake|Got character ZDOID|Closing socket|Destroying abandoned non persistent zdo|Disconnecting client|Random event set|Saved [0-9]+ ZDOs|World saved|join code|Valheim version|Game server connected" /var/log/supervisor/valheim-server* 2>/dev/null | tail -n 2000 || true'
-        ]);
+      if (!hasKnownPlayers && !this.hasScannedHistoricalLogs && !isReconnect) {
+        this.hasScannedHistoricalLogs = true;
+        const histOut = await this.execInContainer(
+          [
+            'sh',
+            '-c',
+            'grep -hE "Got handshake|Got character ZDOID|Closing socket|Destroying abandoned non persistent zdo|Disconnecting client|Random event set|Saved [0-9]+ ZDOs|World saved|join code|Valheim version|Game server connected" /var/log/supervisor/valheim-server* 2>/dev/null | tail -n 2000 || true'
+          ],
+          15000
+        );
         if (histOut) {
           for (const line of histOut.split(/\r?\n/)) {
             this.logParser.processLine(line, { isHistorical: true });
@@ -520,32 +596,62 @@ class DockerController {
       }
     } catch (_) {}
 
-    // 2. Attach to Docker stdout/stderr stream with 500-line history tail (fast startup & matches dashboard ring buffer)
+    const scheduleReconnect = () => {
+      if (this.logReconnectTimer || !this.socketAvailable) return;
+      this.logReconnectTimer = setTimeout(() => {
+        this.logReconnectTimer = null;
+        this.attachContainerLogs({ isReconnect: true }).catch(() => {});
+      }, 5000);
+    };
+
+    const tailCount = isReconnect ? 40 : 400;
+
+    // 2. Attach to Docker stdout/stderr stream with automatic error handling & reconnection
     const req = http.request(
       {
         socketPath: DOCKER_SOCKET,
-        path: `/containers/${this.containerId}/logs?stdout=true&stderr=true&follow=true&tail=500`,
+        path: `/containers/${this.containerId}/logs?stdout=true&stderr=true&follow=true&tail=${tailCount}`,
         method: 'GET'
       },
       (res) => {
         let leftover = '';
         let initialBatch = true;
-        setTimeout(() => {
+        const batchTimer = setTimeout(() => {
           initialBatch = false;
           this.configManager.saveState();
         }, 3000);
 
         res.on('data', (chunk) => {
           leftover += chunk.toString('utf8');
+          if (leftover.length > 65536) {
+            leftover = leftover.slice(-16384);
+          }
           const lines = leftover.split(/\r?\n/);
           leftover = lines.pop() || '';
           for (const line of lines) {
             this.logParser.processLine(line, { isHistorical: initialBatch });
           }
         });
+
+        res.on('error', () => {
+          clearTimeout(batchTimer);
+          scheduleReconnect();
+        });
+
+        res.on('end', () => {
+          clearTimeout(batchTimer);
+          scheduleReconnect();
+        });
+
+        res.on('close', () => {
+          clearTimeout(batchTimer);
+          scheduleReconnect();
+        });
       }
     );
-    req.on('error', () => {});
+    req.on('error', () => {
+      scheduleReconnect();
+    });
     req.end();
     this.logStreamReq = req;
   }
@@ -988,37 +1094,45 @@ class DockerController {
   }
 
   async pollMetrics() {
-    if (this.socketAvailable) {
-      await this.refreshContainerStatus();
-      // Also query lloesche's status.json or UDP A2S if available
-      const statusJson = await fetchStatusJson({ host: this.currentStatus.containerIp, port: 80 });
-      if (statusJson && statusJson.server_name) {
-        this.configManager.state.serverMeta.serverName = statusJson.server_name;
-      }
-    } else {
-      // Gently fluctuate CPU/RAM telemetry in simulation mode
-      if (this.currentStatus.state === 'running') {
-        const onlineCount = Object.values(this.configManager.state.players).filter((p) => p.online).length;
-        const baseCpu = 12 + onlineCount * 4.5;
-        this.currentStatus.cpuPercent = Number(
-          Math.max(4, Math.min(95, baseCpu + (Math.random() * 6 - 3))).toFixed(1)
-        );
-        this.currentStatus.memoryUsedMb = Math.round(3280 + onlineCount * 85 + (Math.random() * 30 - 15));
-        this.currentStatus.netRxMb = Number((this.currentStatus.netRxMb + Math.random() * 0.4).toFixed(1));
-        this.currentStatus.netTxMb = Number((this.currentStatus.netTxMb + Math.random() * 0.35).toFixed(1));
-      } else {
-        this.currentStatus.cpuPercent = 0.2;
-        this.currentStatus.memoryUsedMb = 140;
-      }
-    }
+    if (this.isPollingMetrics) return;
+    this.isPollingMetrics = true;
 
-    this.telemetryHistory.push({
-      timestamp: new Date().toISOString(),
-      cpuPercent: this.currentStatus.cpuPercent,
-      memoryUsedMb: this.currentStatus.memoryUsedMb
-    });
-    if (this.telemetryHistory.length > 35) {
-      this.telemetryHistory.shift();
+    try {
+      if (this.socketAvailable) {
+        await this.refreshContainerStatus();
+        // Also query lloesche's status.json if available
+        const statusJson = await fetchStatusJson({ host: this.currentStatus.containerIp, port: 80 });
+        if (statusJson && statusJson.server_name) {
+          this.configManager.state.serverMeta.serverName = statusJson.server_name;
+        }
+      } else {
+        // Gently fluctuate CPU/RAM telemetry in simulation mode
+        if (this.currentStatus.state === 'running') {
+          const onlineCount = Object.values(this.configManager.state.players).filter((p) => p.online).length;
+          const baseCpu = 12 + onlineCount * 4.5;
+          this.currentStatus.cpuPercent = Number(
+            Math.max(4, Math.min(95, baseCpu + (Math.random() * 6 - 3))).toFixed(1)
+          );
+          this.currentStatus.memoryUsedMb = Math.round(3280 + onlineCount * 85 + (Math.random() * 30 - 15));
+          this.currentStatus.netRxMb = Number((this.currentStatus.netRxMb + Math.random() * 0.4).toFixed(1));
+          this.currentStatus.netTxMb = Number((this.currentStatus.netTxMb + Math.random() * 0.35).toFixed(1));
+        } else {
+          this.currentStatus.cpuPercent = 0.2;
+          this.currentStatus.memoryUsedMb = 140;
+        }
+      }
+
+      this.telemetryHistory.push({
+        timestamp: new Date().toISOString(),
+        cpuPercent: this.currentStatus.cpuPercent,
+        memoryUsedMb: this.currentStatus.memoryUsedMb
+      });
+      if (this.telemetryHistory.length > 35) {
+        this.telemetryHistory.shift();
+      }
+    } catch (_) {
+    } finally {
+      this.isPollingMetrics = false;
     }
   }
 
