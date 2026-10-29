@@ -1,5 +1,8 @@
 using System;
+using System.Reflection;
 using UnityEngine;
+
+[assembly: AssemblyVersion("5.4.23.6")]
 
 namespace BepInEx.Logging
 {

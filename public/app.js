@@ -2596,16 +2596,27 @@ function ensureValheimTerrainCache(wm) {
       const worldDist = Math.hypot(wx, wz);
 
       if (serverHeights && serverBiomes && serverGridRes > 0) {
-        const sx = Math.max(0, Math.min(serverGridRes - 1, Math.round((px / (TERRAIN_RES - 1)) * (serverGridRes - 1))));
-        const sy = Math.max(0, Math.min(serverGridRes - 1, Math.round((py / (TERRAIN_RES - 1)) * (serverGridRes - 1))));
+        const fx = (px / (TERRAIN_RES - 1)) * (serverGridRes - 1);
+        const fy = (py / (TERRAIN_RES - 1)) * (serverGridRes - 1);
+        const x0 = Math.max(0, Math.min(serverGridRes - 1, Math.floor(fx)));
+        const y0 = Math.max(0, Math.min(serverGridRes - 1, Math.floor(fy)));
+        const x1 = Math.min(serverGridRes - 1, x0 + 1);
+        const y1 = Math.min(serverGridRes - 1, y0 + 1);
+        const tx = fx - x0;
+        const ty = fy - y0;
+
+        const h00 = serverHeights[y0 * serverGridRes + x0];
+        const h10 = serverHeights[y0 * serverGridRes + x1];
+        const h01 = serverHeights[y1 * serverGridRes + x0];
+        const h11 = serverHeights[y1 * serverGridRes + x1];
+        const interpH = (h00 * (1 - tx) + h10 * tx) * (1 - ty) + (h01 * (1 - tx) + h11 * tx) * ty;
+
+        const sx = Math.max(0, Math.min(serverGridRes - 1, Math.round(fx)));
+        const sy = Math.max(0, Math.min(serverGridRes - 1, Math.round(fy)));
         const sIdx = sy * serverGridRes + sx;
 
-        heights[idx] = serverHeights[sIdx] / 255.0;
-        let bCode = serverBiomes[sIdx];
-        if (worldDist < 1000) {
-          if (worldDist < 550) bCode = 1;
-          else if (worldDist < 1000 && bCode === 4) bCode = 2;
-        }
+        heights[idx] = interpH / 255.0;
+        const bCode = serverBiomes[sIdx];
         biomes[idx] = heights[idx] < seaLevel ? 0 : bCode;
         continue;
       }

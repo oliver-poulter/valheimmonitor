@@ -20,7 +20,7 @@ using BepInEx;
 
 namespace HeimdallWatchtower
 {
-    [BepInPlugin("com.watchtower.valheim.mapexporter", "Heimdall Watchtower Map Exporter", "1.6.0")]
+    [BepInPlugin("com.watchtower.valheim.mapexporter", "Heimdall Watchtower Map Exporter", "1.7.0")]
     public class WatchtowerMapExporter : BaseUnityPlugin
     {
         private const float ExportIntervalSeconds = 2.0f;
@@ -54,9 +54,9 @@ namespace HeimdallWatchtower
         private byte[] _biomeBytes;
         private byte[] _heightBytes;
         private MethodInfo _getBiomeMethod;
-        private int _getBiomeParamCount;
+        private object[] _getBiomeDefaultArgs;
         private MethodInfo _getHeightMethod;
-        private int _getHeightParamCount;
+        private object[] _getHeightDefaultArgs;
 
         // Cached reflection members to avoid per-tick allocations in Mono Boehm GC
         private MethodInfo _getZdoMethod;
@@ -64,6 +64,8 @@ namespace HeimdallWatchtower
         private static Type _cachedZdoType;
         private static MethodInfo _zdoGetFloatIntMethod;
         private static MethodInfo _zdoGetFloatStrMethod;
+        private static MethodInfo _zdoGetStringIntMethod;
+        private static MethodInfo _zdoGetStringStrMethod;
         private static MethodInfo _zdoGetPosMethod;
         private static FieldInfo _zdoPosField;
 
@@ -80,6 +82,7 @@ namespace HeimdallWatchtower
         private static readonly int HashStamina = GetValheimStableHashCode("stamina");
         private static readonly int HashMaxStamina = GetValheimStableHashCode("max_stamina");
         private static readonly int HashNoise = GetValheimStableHashCode("noise");
+        private static readonly int HashPlayerName = GetValheimStableHashCode("playerName");
 
         private const BindingFlags InstFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
 
@@ -154,7 +157,7 @@ namespace HeimdallWatchtower
                 {
                     _backgroundTimer = new Timer(OnBackgroundTimerTick, null, 2000, 2000);
                 }
-                Logger.LogInfo("[Heimdall Watchtower] Live Map, Terrain & Health ZDO Exporter v1.6.0 initialized.");
+                Logger.LogInfo("[Heimdall Watchtower] Live Map, Terrain & Health ZDO Exporter v1.7.0 initialized.");
             }
             catch (Exception ex)
             {
@@ -178,7 +181,7 @@ namespace HeimdallWatchtower
                 var sb = new StringBuilder(512);
                 sb.Append("{\n");
                 sb.AppendFormat("  \"pluginStatus\": \"{0}\",\n", EscapeJson(status));
-                sb.Append("  \"pluginVersion\": \"1.6.0\",\n");
+                sb.Append("  \"pluginVersion\": \"1.7.0\",\n");
                 string nowIso = DateTime.UtcNow.ToString("o");
                 sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", nowIso);
                 sb.AppendFormat("  \"timestamp\": \"{0}\",\n", nowIso);
@@ -208,7 +211,7 @@ namespace HeimdallWatchtower
                 {
                     try
                     {
-                        StepTerrainExport(isMainThread ? 8 : 25);
+                        StepTerrainExport(isMainThread ? 16 : 50);
                     }
                     catch
                     {
@@ -327,20 +330,102 @@ namespace HeimdallWatchtower
             return null;
         }
 
-        private void StepTerrainExport(int rowsToProcess = 8)
+        private void ExtractWorldMeta(object znetInstance, object wgInstance, out string worldName, out string seedName, out int seedNumeric, out bool isMenu)
         {
-            ResolveTypes();
-            if (_worldGenType == null || _znetType == null) return;
+            worldName = "";
+            seedName = "";
+            seedNumeric = 0;
+            isMenu = false;
 
-            var wgInstance = GetStaticInstance(_worldGenType);
-            var znetInstance = GetStaticInstance(_znetType);
+            if (_znetType != null && znetInstance != null)
+            {
+                worldName = InvokeMethod(_znetType, znetInstance, "GetWorldName", InstFlags) as string ?? "";
+            }
 
-            if (wgInstance == null || znetInstance == null) return;
+            object worldObj = null;
+            if (_worldGenType != null && wgInstance != null)
+            {
+                worldObj = GetMemberVal(_worldGenType, wgInstance, "m_world", InstFlags);
+            }
+            if (worldObj == null && _znetType != null && znetInstance != null)
+            {
+                worldObj = GetMemberVal(_znetType, znetInstance, "m_world", InstFlags);
+            }
+
+            if (worldObj != null)
+            {
+                var wType = worldObj.GetType();
+                string wName = GetMemberVal(wType, worldObj, "m_name", InstFlags) as string;
+                if (!string.IsNullOrEmpty(wName) && string.IsNullOrEmpty(worldName))
+                {
+                    worldName = wName;
+                }
+                seedName = GetMemberVal(wType, worldObj, "m_seedName", InstFlags) as string ?? "";
+                object seedObj = GetMemberVal(wType, worldObj, "m_seed", InstFlags);
+                if (seedObj != null)
+                {
+                    try { seedNumeric = Convert.ToInt32(seedObj); } catch { }
+                }
+                object menuObj = GetMemberVal(wType, worldObj, "m_menu", InstFlags);
+                if (menuObj is bool)
+                {
+                    isMenu = (bool)menuObj;
+                }
+            }
+
+            if (seedNumeric == 0 && !string.IsNullOrEmpty(seedName))
+            {
+                seedNumeric = GetValheimStableHashCode(seedName);
+            }
+            if (string.IsNullOrEmpty(worldName))
+            {
+                worldName = "Dedicated";
+            }
+        }
+
+        private static object[] BuildDefaultArgArray(MethodInfo m)
+        {
+            var ps = m.GetParameters();
+            var args = new object[ps.Length];
+            args[0] = 0f;
+            args[1] = 0f;
+            for (int i = 2; i < ps.Length; i++)
+            {
+                var p = ps[i];
+                var pt = p.ParameterType;
+                if (pt.IsByRef) pt = pt.GetElementType();
+                if (p.HasDefaultValue && p.DefaultValue != DBNull.Value && p.DefaultValue != null)
+                {
+                    args[i] = p.DefaultValue;
+                }
+                else if (pt == typeof(float))
+                {
+                    args[i] = 0.02f;
+                }
+                else if (pt == typeof(bool))
+                {
+                    args[i] = false;
+                }
+                else if (pt != null && pt.IsValueType)
+                {
+                    try { args[i] = Activator.CreateInstance(pt); } catch { }
+                }
+                else
+                {
+                    args[i] = null;
+                }
+            }
+            return args;
+        }
+
+        private void EnsureWorldGenMethods()
+        {
+            if (_worldGenType == null) return;
 
             if (_getBiomeMethod == null)
             {
                 MethodInfo fallbackBiome = null;
-                foreach (var m in _worldGenType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                foreach (var m in _worldGenType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 {
                     if (m.Name == "GetBiome")
                     {
@@ -348,26 +433,31 @@ namespace HeimdallWatchtower
                         if (ps.Length == 2 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
                         {
                             _getBiomeMethod = m;
-                            _getBiomeParamCount = 2;
                             break;
                         }
-                        if (ps.Length == 4 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
+                        if (ps.Length >= 2 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
                         {
-                            fallbackBiome = m;
+                            if (fallbackBiome == null || ps.Length < fallbackBiome.GetParameters().Length)
+                            {
+                                fallbackBiome = m;
+                            }
                         }
                     }
                 }
                 if (_getBiomeMethod == null && fallbackBiome != null)
                 {
                     _getBiomeMethod = fallbackBiome;
-                    _getBiomeParamCount = 4;
+                }
+                if (_getBiomeMethod != null)
+                {
+                    _getBiomeDefaultArgs = BuildDefaultArgArray(_getBiomeMethod);
                 }
             }
 
             if (_getHeightMethod == null)
             {
                 MethodInfo fallbackHeight = null;
-                foreach (var m in _worldGenType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                foreach (var m in _worldGenType.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
                 {
                     if (m.Name == "GetHeight")
                     {
@@ -375,21 +465,45 @@ namespace HeimdallWatchtower
                         if (ps.Length == 2 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
                         {
                             _getHeightMethod = m;
-                            _getHeightParamCount = 2;
                             break;
                         }
-                        if (ps.Length == 3 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
+                        if (ps.Length >= 2 && ps[0].ParameterType == typeof(float) && ps[1].ParameterType == typeof(float))
                         {
-                            fallbackHeight = m;
+                            if (fallbackHeight == null || ps.Length < fallbackHeight.GetParameters().Length)
+                            {
+                                fallbackHeight = m;
+                            }
                         }
                     }
                 }
                 if (_getHeightMethod == null && fallbackHeight != null)
                 {
                     _getHeightMethod = fallbackHeight;
-                    _getHeightParamCount = 3;
+                }
+                if (_getHeightMethod != null)
+                {
+                    _getHeightDefaultArgs = BuildDefaultArgArray(_getHeightMethod);
                 }
             }
+        }
+
+        private void StepTerrainExport(int rowsToProcess = 16)
+        {
+            ResolveTypes();
+            if (_worldGenType == null || _znetType == null) return;
+
+            var wgInstance = GetStaticInstance(_worldGenType);
+            var znetInstance = ResolveZNetInstance();
+
+            if (wgInstance == null || znetInstance == null) return;
+
+            string worldName, seedName;
+            int seedNumeric;
+            bool isMenu;
+            ExtractWorldMeta(znetInstance, wgInstance, out worldName, out seedName, out seedNumeric, out isMenu);
+            if (isMenu) return;
+
+            EnsureWorldGenMethods();
 
             if (_getBiomeMethod == null || _getHeightMethod == null)
             {
@@ -404,23 +518,8 @@ namespace HeimdallWatchtower
                 _terrainRow = 0;
             }
 
-            object[] bArgs = _getBiomeParamCount == 4
-                ? new object[] { 0f, 0f, 0.02f, false }
-                : new object[] { 0f, 0f };
-
-            object defaultThirdArg = null;
-            if (_getHeightParamCount == 3)
-            {
-                var pType = _getHeightMethod.GetParameters()[2].ParameterType;
-                if (pType.IsByRef) pType = pType.GetElementType();
-                if (pType != null && pType.IsValueType)
-                {
-                    try { defaultThirdArg = Activator.CreateInstance(pType); } catch { }
-                }
-            }
-            object[] hArgs = _getHeightParamCount == 3
-                ? new object[] { 0f, 0f, defaultThirdArg }
-                : new object[] { 0f, 0f };
+            object[] bArgs = (object[])_getBiomeDefaultArgs.Clone();
+            object[] hArgs = (object[])_getHeightDefaultArgs.Clone();
 
             // Process rowsToProcess rows per tick so server tick is never delayed
             while (rowsToProcess > 0 && _terrainRow < GridSize)
@@ -459,12 +558,12 @@ namespace HeimdallWatchtower
             if (_terrainRow >= GridSize)
             {
                 _terrainExported = true;
-                string worldName = InvokeMethod(_znetType, znetInstance, "GetWorldName", InstFlags) as string;
-                if (string.IsNullOrEmpty(worldName)) worldName = "Dedicated";
 
                 var sb = new StringBuilder(131072);
                 sb.Append("{\n");
                 sb.AppendFormat("  \"worldName\": \"{0}\",\n", EscapeJson(worldName));
+                sb.AppendFormat("  \"seedName\": \"{0}\",\n", EscapeJson(seedName));
+                sb.AppendFormat(CultureInfo.InvariantCulture, "  \"seedNumeric\": {0},\n", seedNumeric);
                 sb.AppendFormat("  \"gridSize\": {0},\n", GridSize);
                 sb.Append("  \"seaLevelByte\": 40,\n");
                 sb.AppendFormat("  \"biomesBase64\": \"{0}\",\n", Convert.ToBase64String(_biomeBytes));
@@ -633,6 +732,43 @@ namespace HeimdallWatchtower
             }
         }
 
+        private static string MapBiomeCodeToName(byte code)
+        {
+            switch (code)
+            {
+                case 1: return "Meadows";
+                case 2: return "Black Forest";
+                case 3: return "Swamp";
+                case 4: return "Mountains";
+                case 5: return "Plains";
+                case 6: return "Mistlands";
+                case 7: return "Ashlands";
+                case 8: return "Deep North";
+                default: return "Ocean";
+            }
+        }
+
+        private string SampleBiomeNameAt(object wgInstance, float x, float z)
+        {
+            if (wgInstance != null)
+            {
+                try
+                {
+                    EnsureWorldGenMethods();
+                    if (_getBiomeMethod != null && _getBiomeDefaultArgs != null)
+                    {
+                        var args = (object[])_getBiomeDefaultArgs.Clone();
+                        args[0] = x;
+                        args[1] = z;
+                        int rawBiome = Convert.ToInt32(_getBiomeMethod.Invoke(wgInstance, args));
+                        return MapBiomeCodeToName(MapBiomeEnumToCode(rawBiome));
+                    }
+                }
+                catch { }
+            }
+            return "";
+        }
+
         private class PeerVitalState
         {
             public float LastX;
@@ -723,6 +859,8 @@ namespace HeimdallWatchtower
             if (_cachedZdoType == zdoType) return;
             _zdoGetFloatIntMethod = zdoType.GetMethod("GetFloat", new[] { typeof(int), typeof(float) });
             _zdoGetFloatStrMethod = zdoType.GetMethod("GetFloat", new[] { typeof(string), typeof(float) });
+            _zdoGetStringIntMethod = zdoType.GetMethod("GetString", new[] { typeof(int), typeof(string) });
+            _zdoGetStringStrMethod = zdoType.GetMethod("GetString", new[] { typeof(string), typeof(string) });
             _zdoGetPosMethod = zdoType.GetMethod("GetPosition", Type.EmptyTypes) ?? zdoType.GetMethod("GetPosition");
             _zdoPosField = zdoType.GetField("m_position", InstFlags);
             _cachedZdoType = zdoType;
@@ -750,6 +888,58 @@ namespace HeimdallWatchtower
             return defaultVal;
         }
 
+        private static string ReadZdoString(object zdo, int keyHash, string keyName, string defaultVal)
+        {
+            if (zdo == null) return defaultVal;
+            EnsureZdoReflectionCached(zdo.GetType());
+
+            if (_zdoGetStringIntMethod != null)
+            {
+                try
+                {
+                    string val = _zdoGetStringIntMethod.Invoke(zdo, new object[] { keyHash, defaultVal }) as string;
+                    if (!string.IsNullOrEmpty(val)) return val;
+                }
+                catch { }
+            }
+            if (_zdoGetStringStrMethod != null)
+            {
+                try
+                {
+                    string val = _zdoGetStringStrMethod.Invoke(zdo, new object[] { keyName, defaultVal }) as string;
+                    if (!string.IsNullOrEmpty(val)) return val;
+                }
+                catch { }
+            }
+            return defaultVal;
+        }
+
+        private object ResolveCharacterZdo(object zdoManInstance, IDictionary zdoDict, object charIdObj)
+        {
+            if (charIdObj == null) return null;
+            if (_getZdoMethod != null && zdoManInstance != null)
+            {
+                try
+                {
+                    object zdo = _getZdoMethod.Invoke(zdoManInstance, new[] { charIdObj });
+                    if (zdo != null) return zdo;
+                }
+                catch { }
+            }
+            if (zdoDict != null)
+            {
+                try
+                {
+                    if (zdoDict.Contains(charIdObj))
+                    {
+                        return zdoDict[charIdObj];
+                    }
+                }
+                catch { }
+            }
+            return null;
+        }
+
         private void ExportWorldAndPlayers()
         {
             ResolveTypes();
@@ -766,11 +956,14 @@ namespace HeimdallWatchtower
                 return;
             }
 
+            var wgInstance = _worldGenType != null ? GetStaticInstance(_worldGenType) : null;
             var zdoManInstance = GetMemberVal(_znetType, znetInstance, "m_zdoMan", InstFlags)
                               ?? GetStaticInstance(_zdoManType);
 
-            string worldName = InvokeMethod(_znetType, znetInstance, "GetWorldName", InstFlags) as string;
-            if (string.IsNullOrEmpty(worldName)) worldName = "Dedicated";
+            string worldName, seedName;
+            int seedNumeric;
+            bool isMenu;
+            ExtractWorldMeta(znetInstance, wgInstance, out worldName, out seedName, out seedNumeric, out isMenu);
 
             var peersObj = GetFieldVal(_znetType, znetInstance, "m_peers", InstFlags) as IEnumerable
                         ?? InvokeMethod(_znetType, znetInstance, "GetPeers", InstFlags) as IEnumerable;
@@ -820,11 +1013,19 @@ namespace HeimdallWatchtower
                 }
             }
 
+            IDictionary zdoObjectsById = null;
+            if (zdoManInstance != null && _zdoManType != null)
+            {
+                zdoObjectsById = GetFieldVal(_zdoManType, zdoManInstance, "m_objectsByID", InstFlags) as IDictionary;
+            }
+
             var sb = new StringBuilder(4096);
             sb.Append("{\n");
             sb.Append("  \"pluginStatus\": \"active\",\n");
-            sb.Append("  \"pluginVersion\": \"1.6.0\",\n");
+            sb.Append("  \"pluginVersion\": \"1.7.0\",\n");
             sb.AppendFormat("  \"worldName\": \"{0}\",\n", EscapeJson(worldName));
+            sb.AppendFormat("  \"seedName\": \"{0}\",\n", EscapeJson(seedName));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "  \"seedNumeric\": {0},\n", seedNumeric);
             string nowIso = DateTime.UtcNow.ToString("o");
             sb.AppendFormat("  \"lastUpdated\": \"{0}\",\n", nowIso);
             sb.AppendFormat("  \"timestamp\": \"{0}\",\n", nowIso);
@@ -839,7 +1040,6 @@ namespace HeimdallWatchtower
                 var peerType = peer.GetType();
 
                 string playerName = GetFieldVal(peerType, peer, "m_playerName", InstFlags) as string;
-                if (string.IsNullOrEmpty(playerName)) playerName = "Viking";
 
                 object refPosObj = GetFieldVal(peerType, peer, "m_refPos", InstFlags)
                                 ?? InvokeMethod(peerType, peer, "GetRefPos", BindingFlags.Public | BindingFlags.Instance);
@@ -871,7 +1071,6 @@ namespace HeimdallWatchtower
                     }
                     catch { }
                 }
-                string stateKey = !string.IsNullOrEmpty(steamId) ? steamId : playerName;
 
                 float rawHp = -1f;
                 float rawMaxHp = -1f;
@@ -879,35 +1078,45 @@ namespace HeimdallWatchtower
                 float rawMaxStamina = -1f;
                 float zdoNoise = 0f;
 
-                if (charIdObj != null && _getZdoMethod != null && zdoManInstance != null)
+                object zdo = ResolveCharacterZdo(zdoManInstance, zdoObjectsById, charIdObj);
+                if (zdo != null)
                 {
                     try
                     {
-                        object zdo = _getZdoMethod.Invoke(zdoManInstance, new[] { charIdObj });
-                        if (zdo != null)
+                        EnsureZdoReflectionCached(zdo.GetType());
+                        object zdoPos = _zdoGetPosMethod != null ? _zdoGetPosMethod.Invoke(zdo, null) : null;
+                        if (zdoPos == null && _zdoPosField != null) zdoPos = _zdoPosField.GetValue(zdo);
+
+                        float zx, zy, zz;
+                        if (TryExtractVector3(zdoPos, out zx, out zy, out zz) && (zx != 0f || zz != 0f || zy > 1f))
                         {
-                            EnsureZdoReflectionCached(zdo.GetType());
-                            object zdoPos = _zdoGetPosMethod != null ? _zdoGetPosMethod.Invoke(zdo, null) : null;
-                            if (zdoPos == null && _zdoPosField != null) zdoPos = _zdoPosField.GetValue(zdo);
-
-                            float zx, zy, zz;
-                            if (TryExtractVector3(zdoPos, out zx, out zy, out zz) && (zx != 0f || zz != 0f || zy > 1f))
-                            {
-                                x = zx; y = zy; z = zz;
-                            }
-
-                            rawHp = ReadZdoFloat(zdo, HashHealth, "health", -1f);
-                            rawMaxHp = ReadZdoFloat(zdo, HashMaxHealth, "max_health", -1f);
-                            rawStamina = ReadZdoFloat(zdo, HashStamina, "stamina", -1f);
-                            rawMaxStamina = ReadZdoFloat(zdo, HashMaxStamina, "max_stamina", -1f);
-                            zdoNoise = ReadZdoFloat(zdo, HashNoise, "noise", 0f);
+                            x = zx; y = zy; z = zz;
                         }
+
+                        if (string.IsNullOrEmpty(playerName))
+                        {
+                            playerName = ReadZdoString(zdo, HashPlayerName, "playerName", "");
+                        }
+
+                        rawHp = ReadZdoFloat(zdo, HashHealth, "health", -1f);
+                        rawMaxHp = ReadZdoFloat(zdo, HashMaxHealth, "max_health", -1f);
+                        rawStamina = ReadZdoFloat(zdo, HashStamina, "stamina", -1f);
+                        rawMaxStamina = ReadZdoFloat(zdo, HashMaxStamina, "max_stamina", -1f);
+                        zdoNoise = ReadZdoFloat(zdo, HashNoise, "noise", 0f);
                     }
                     catch
                     {
                         // Ignore transient ZDO error
                     }
                 }
+
+                // Skip unauthenticated handshake sockets that have no playerName and no coordinates
+                if (string.IsNullOrEmpty(playerName) && x == 0f && z == 0f)
+                {
+                    continue;
+                }
+                if (string.IsNullOrEmpty(playerName)) playerName = "Viking";
+                string stateKey = !string.IsNullOrEmpty(steamId) ? steamId : playerName;
 
                 // Fallback to GetPlayerList if peer position is (0, 0)
                 Vec3 pPos;
@@ -1028,6 +1237,8 @@ namespace HeimdallWatchtower
                 processedNames.Add(playerName);
 
                 bool hasValidGps = (x != 0f || z != 0f || y > 1f);
+                string biomeName = hasValidGps ? SampleBiomeNameAt(wgInstance, x, z) : "";
+
                 if (!first) sb.Append(",\n");
                 first = false;
 
@@ -1043,11 +1254,15 @@ namespace HeimdallWatchtower
                 sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxHp\": {0:F0},\n", maxHp);
                 sb.AppendFormat(CultureInfo.InvariantCulture, "      \"stamina\": {0:F0},\n", stamina);
                 sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxStamina\": {0:F0},\n", maxStamina);
+                if (!string.IsNullOrEmpty(biomeName))
+                {
+                    sb.AppendFormat("      \"biome\": \"{0}\",\n", EscapeJson(biomeName));
+                }
                 sb.AppendFormat("      \"activity\": \"{0}\"\n", EscapeJson(activity));
                 sb.Append("    }");
             }
 
-            // Fallback: Check ZNet.GetPlayerList() for connected players who may not be in peersObj
+            // Fallback 1: Check ZNet.GetPlayerList() for connected players who may not be in peersObj
             if (playerListSnapshot != null)
             {
                 for (int i = 0; i < playerListSnapshot.Count; i++)
@@ -1066,28 +1281,25 @@ namespace HeimdallWatchtower
                     TryExtractVector3(piPosObj, out px, out py, out pz);
 
                     float rawHp = -1f, rawMaxHp = -1f, rawStamina = -1f, rawMaxStamina = -1f, zdoNoise = 0f;
-                    if (piCharIdObj != null && _getZdoMethod != null && zdoManInstance != null)
+                    object zdo = ResolveCharacterZdo(zdoManInstance, zdoObjectsById, piCharIdObj);
+                    if (zdo != null)
                     {
                         try
                         {
-                            object zdo = _getZdoMethod.Invoke(zdoManInstance, new[] { piCharIdObj });
-                            if (zdo != null)
-                            {
-                                EnsureZdoReflectionCached(zdo.GetType());
-                                object zdoPos = _zdoGetPosMethod != null ? _zdoGetPosMethod.Invoke(zdo, null) : null;
-                                if (zdoPos == null && _zdoPosField != null) zdoPos = _zdoPosField.GetValue(zdo);
+                            EnsureZdoReflectionCached(zdo.GetType());
+                            object zdoPos = _zdoGetPosMethod != null ? _zdoGetPosMethod.Invoke(zdo, null) : null;
+                            if (zdoPos == null && _zdoPosField != null) zdoPos = _zdoPosField.GetValue(zdo);
 
-                                float zx, zy, zz;
-                                if (TryExtractVector3(zdoPos, out zx, out zy, out zz) && (zx != 0f || zz != 0f || zy > 1f))
-                                {
-                                    px = zx; py = zy; pz = zz;
-                                }
-                                rawHp = ReadZdoFloat(zdo, HashHealth, "health", -1f);
-                                rawMaxHp = ReadZdoFloat(zdo, HashMaxHealth, "max_health", -1f);
-                                rawStamina = ReadZdoFloat(zdo, HashStamina, "stamina", -1f);
-                                rawMaxStamina = ReadZdoFloat(zdo, HashMaxStamina, "max_stamina", -1f);
-                                zdoNoise = ReadZdoFloat(zdo, HashNoise, "noise", 0f);
+                            float zx, zy, zz;
+                            if (TryExtractVector3(zdoPos, out zx, out zy, out zz) && (zx != 0f || zz != 0f || zy > 1f))
+                            {
+                                px = zx; py = zy; pz = zz;
                             }
+                            rawHp = ReadZdoFloat(zdo, HashHealth, "health", -1f);
+                            rawMaxHp = ReadZdoFloat(zdo, HashMaxHealth, "max_health", -1f);
+                            rawStamina = ReadZdoFloat(zdo, HashStamina, "stamina", -1f);
+                            rawMaxStamina = ReadZdoFloat(zdo, HashMaxStamina, "max_stamina", -1f);
+                            zdoNoise = ReadZdoFloat(zdo, HashNoise, "noise", 0f);
                         }
                         catch { }
                     }
@@ -1123,6 +1335,8 @@ namespace HeimdallWatchtower
                     pState.LastX = px; pState.LastY = py; pState.LastZ = pz; pState.LastHp = hp; pState.Initialized = true;
 
                     bool hasValidGps = (px != 0f || pz != 0f || py > 1f);
+                    string biomeName = hasValidGps ? SampleBiomeNameAt(wgInstance, px, pz) : "";
+
                     if (!first) sb.Append(",\n");
                     first = false;
 
@@ -1138,9 +1352,71 @@ namespace HeimdallWatchtower
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxHp\": {0:F0},\n", maxHp);
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"stamina\": {0:F0},\n", stamina);
                     sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxStamina\": {0:F0},\n", maxStamina);
+                    if (!string.IsNullOrEmpty(biomeName))
+                    {
+                        sb.AppendFormat("      \"biome\": \"{0}\",\n", EscapeJson(biomeName));
+                    }
                     sb.AppendFormat("      \"activity\": \"{0}\"\n", EscapeJson(activity));
                     sb.Append("    }");
                 }
+            }
+
+            // Fallback 2: Check ZNet.GetAllCharacterZDOS() if still no players found
+            if (first)
+            {
+                try
+                {
+                    var charZdosObj = InvokeMethod(_znetType, znetInstance, "GetAllCharacterZDOS", InstFlags) as IEnumerable;
+                    var charZdos = SnapshotEnumerable(charZdosObj);
+                    for (int i = 0; i < charZdos.Count; i++)
+                    {
+                        var zdo = charZdos[i];
+                        if (zdo == null) continue;
+                        EnsureZdoReflectionCached(zdo.GetType());
+                        string cName = ReadZdoString(zdo, HashPlayerName, "playerName", "");
+                        if (string.IsNullOrEmpty(cName) || processedNames.Contains(cName)) continue;
+                        processedNames.Add(cName);
+
+                        object zdoPos = _zdoGetPosMethod != null ? _zdoGetPosMethod.Invoke(zdo, null) : null;
+                        if (zdoPos == null && _zdoPosField != null) zdoPos = _zdoPosField.GetValue(zdo);
+                        float zx = 0f, zy = 0f, zz = 0f;
+                        TryExtractVector3(zdoPos, out zx, out zy, out zz);
+
+                        float rawHp = ReadZdoFloat(zdo, HashHealth, "health", 25f);
+                        float rawMaxHp = ReadZdoFloat(zdo, HashMaxHealth, "max_health", 25f);
+                        float rawStamina = ReadZdoFloat(zdo, HashStamina, "stamina", 50f);
+                        float rawMaxStamina = ReadZdoFloat(zdo, HashMaxStamina, "max_stamina", 50f);
+                        float maxHp = rawMaxHp > 0f ? rawMaxHp : (rawHp > 25f ? rawHp : 25f);
+                        float hp = rawHp > 0f ? rawHp : maxHp;
+                        float maxStamina = rawMaxStamina > 0f ? rawMaxStamina : 50f;
+                        float stamina = rawStamina >= 0f ? rawStamina : maxStamina;
+                        bool hasValidGps = (zx != 0f || zz != 0f || zy > 1f);
+                        string biomeName = hasValidGps ? SampleBiomeNameAt(wgInstance, zx, zz) : "";
+
+                        if (!first) sb.Append(",\n");
+                        first = false;
+
+                        sb.Append("    {\n");
+                        sb.AppendFormat("      \"steamId\": \"{0}\",\n", EscapeJson(cName));
+                        sb.AppendFormat("      \"name\": \"{0}\",\n", EscapeJson(cName));
+                        sb.AppendFormat("      \"hasGps\": {0},\n", hasValidGps ? "true" : "false");
+                        sb.AppendFormat(CultureInfo.InvariantCulture, "      \"x\": {0:F1},\n", zx);
+                        sb.AppendFormat(CultureInfo.InvariantCulture, "      \"y\": {0:F1},\n", zy);
+                        sb.AppendFormat(CultureInfo.InvariantCulture, "      \"z\": {0:F1},\n", zz);
+                        sb.Append("      \"heading\": 0,\n");
+                        sb.AppendFormat(CultureInfo.InvariantCulture, "      \"hp\": {0:F0},\n", hp);
+                        sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxHp\": {0:F0},\n", maxHp);
+                        sb.AppendFormat(CultureInfo.InvariantCulture, "      \"stamina\": {0:F0},\n", stamina);
+                        sb.AppendFormat(CultureInfo.InvariantCulture, "      \"maxStamina\": {0:F0},\n", maxStamina);
+                        if (!string.IsNullOrEmpty(biomeName))
+                        {
+                            sb.AppendFormat("      \"biome\": \"{0}\",\n", EscapeJson(biomeName));
+                        }
+                        sb.Append("      \"activity\": \"Exploring\"\n");
+                        sb.Append("    }");
+                    }
+                }
+                catch { }
             }
 
             sb.Append("\n  ],\n");

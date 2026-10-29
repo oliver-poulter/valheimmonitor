@@ -75,14 +75,14 @@ class DockerController {
         if (process.env.AUTO_CONFIGURE_SERVER !== 'false') {
           setTimeout(async () => {
             try {
-              // Check inside valheim-server container if BepInEx and all performance plugins v1.6.0 are active
+              // Check inside valheim-server container if BepInEx, Doorstop v3+v4 vars, and all performance plugins v1.7.0 are active
               let containerMissingMods = false;
               try {
                 const checkRes = await this.execInContainer(
                   [
                     '/bin/bash',
                     '-c',
-                    'grep -q \'^export BEPINEX="true"\' /usr/local/etc/valheim/defaults 2>/dev/null && test -f /opt/valheim/bepinex/BepInEx/core/BepInEx.Preloader.dll && test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && test -f /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll && grep -q \'"pluginVersion": "1.6.0"\' /config/watchtower/live_map.json 2>/dev/null && ! pgrep -f "/opt/valheim/server/valheim_server" >/dev/null 2>&1 && echo "PRESENT"'
+                    'grep -q \'^export BEPINEX="true"\' /usr/local/etc/valheim/defaults 2>/dev/null && grep -q \'DOORSTOP_ENABLED=\' /usr/local/etc/valheim/defaults 2>/dev/null && test -f /opt/valheim/bepinex/BepInEx/core/BepInEx.Preloader.dll && test -f /opt/valheim/bepinex/BepInEx/plugins/SpreadTheLoad.dll && test -f /opt/valheim/bepinex/BepInEx/plugins/WatchtowerMapExporter.dll && grep -q \'"pluginVersion": "1.7.0"\' /config/watchtower/live_map.json 2>/dev/null && test -f /config/watchtower/world_terrain.json && ! pgrep -f "/opt/valheim/server/valheim_server" >/dev/null 2>&1 && echo "PRESENT"'
                   ],
                   10000
                 );
@@ -221,7 +221,7 @@ class DockerController {
       if (!needsLiveSync) {
         try {
           const stat = fs.statSync(liveMapPath);
-          if (Date.now() - stat.mtimeMs > 4500) {
+          if (Date.now() - stat.mtimeMs > 2500) {
             needsLiveSync = true;
           }
         } catch (_) {
@@ -247,7 +247,18 @@ class DockerController {
 
       const terrainPath = path.join(this.configManager.watchtowerDir, 'world_terrain.json');
       this.terrainSyncPollCount = (this.terrainSyncPollCount || 0) + 1;
-      if (!fs.existsSync(terrainPath) && this.terrainSyncPollCount % 4 === 1) {
+      let needsTerrainSync = !fs.existsSync(terrainPath);
+      if (!needsTerrainSync && this.terrainSyncPollCount % 6 === 1) {
+        try {
+          const localTerrain = fs.readFileSync(terrainPath, 'utf8');
+          if (!localTerrain.includes('"seedNumeric"')) {
+            needsTerrainSync = true;
+          }
+        } catch (_) {
+          needsTerrainSync = true;
+        }
+      }
+      if (needsTerrainSync && this.terrainSyncPollCount % 3 === 1) {
         const rawTerrain = await this.execInContainer(
           ['sh', '-c', 'cat /config/watchtower/world_terrain.json 2>/dev/null || true'],
           8000
@@ -259,6 +270,55 @@ class DockerController {
             const tmpTerrain = `${terrainPath}.sync.tmp`;
             fs.writeFileSync(tmpTerrain, rawTerrain, 'utf8');
             fs.renameSync(tmpTerrain, terrainPath);
+          } catch (_) {}
+        }
+      }
+
+      // Sync active .fwl world metadata from container if local worlds_local has no .fwl yet
+      if (this.terrainSyncPollCount % 5 === 1) {
+        try {
+          const localFwls = fs.existsSync(this.configManager.worldsDir)
+            ? fs.readdirSync(this.configManager.worldsDir).filter((f) => f.endsWith('.fwl') && !f.includes('.old'))
+            : [];
+          if (localFwls.length === 0) {
+            const fwlDump = await this.execInContainer(
+              [
+                'sh',
+                '-c',
+                'for f in /config/worlds_local/*.fwl /config/worlds/*.fwl; do [ -f "$f" ] || continue; case "$f" in *.old*) continue;; esac; echo "FWL:$(basename "$f"):$(base64 -w 0 "$f" 2>/dev/null || base64 "$f" | tr -d "\\n")"; break; done'
+              ],
+              5000
+            );
+            if (fwlDump && fwlDump.startsWith('FWL:')) {
+              const parts = fwlDump.trim().split(':');
+              if (parts.length >= 3 && parts[1] && parts[2]) {
+                fs.mkdirSync(this.configManager.worldsDir, { recursive: true });
+                const fwlBuf = Buffer.from(parts.slice(2).join(':'), 'base64');
+                if (fwlBuf.length >= 16) {
+                  fs.writeFileSync(path.join(this.configManager.worldsDir, parts[1]), fwlBuf);
+                }
+              }
+            }
+          }
+        } catch (_) {}
+
+        // Also check BepInEx LogOutput.log inside container if loadedBepInExPlugins is empty
+        if (this.logParser && this.logParser.loadedBepInExPlugins.size < 4) {
+          try {
+            const bepLog = await this.execInContainer(
+              [
+                'sh',
+                '-c',
+                'grep -iE "Chainloader|Loading \\[|Heimdall Watchtower|SpreadTheLoad|BetterNetworking|ServerDevcommands" /opt/valheim/bepinex/BepInEx/LogOutput.log 2>/dev/null | head -n 40 || true'
+              ],
+              4000
+            );
+            if (bepLog) {
+              this.logParser.bepinexConfirmedEnabled = true;
+              for (const line of bepLog.split(/\r?\n/)) {
+                this.logParser.processLine(line, { isHistorical: true });
+              }
+            }
           } catch (_) {}
         }
       }
@@ -315,13 +375,27 @@ class DockerController {
           sleep 3
         done
 
-        echo "[2/5] Enabling BEPINEX=true and STATUS_HTTP=true in /usr/local/etc/valheim/defaults..."
-        if ! grep -q '^export BEPINEX="true"' /usr/local/etc/valheim/defaults 2>/dev/null; then
+        echo "[2/5] Enabling BEPINEX=true, STATUS_HTTP=true, and UnityDoorstop v3+v4 hooks in /usr/local/etc/valheim/defaults..."
+        if ! grep -q '^export BEPINEX="true"' /usr/local/etc/valheim/defaults 2>/dev/null || ! grep -q '^export DOORSTOP_ENABLED="1"' /usr/local/etc/valheim/defaults 2>/dev/null; then
           sed -i '/BEPINEX=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
           sed -i '/STATUS_HTTP=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
+          sed -i '/DOORSTOP_ENABLED=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
+          sed -i '/DOORSTOP_TARGET_ASSEMBLY=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
+          sed -i '/DOORSTOP_ENABLE=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
+          sed -i '/DOORSTOP_INVOKE_DLL_PATH=/d' /usr/local/etc/valheim/defaults 2>/dev/null || true
           echo "" >> /usr/local/etc/valheim/defaults
           echo 'export BEPINEX="true"' >> /usr/local/etc/valheim/defaults
           echo 'export STATUS_HTTP="true"' >> /usr/local/etc/valheim/defaults
+          echo 'export DOORSTOP_ENABLE="TRUE"' >> /usr/local/etc/valheim/defaults
+          echo 'export DOORSTOP_ENABLED="1"' >> /usr/local/etc/valheim/defaults
+          echo 'export DOORSTOP_INVOKE_DLL_PATH="/opt/valheim/bepinex/BepInEx/core/BepInEx.Preloader.dll"' >> /usr/local/etc/valheim/defaults
+          echo 'export DOORSTOP_TARGET_ASSEMBLY="/opt/valheim/bepinex/BepInEx/core/BepInEx.Preloader.dll"' >> /usr/local/etc/valheim/defaults
+          NEEDS_RESTART=1
+        fi
+
+        # Ensure /usr/local/bin/valheim-server also exports Doorstop 4 variables if it only sets legacy DOORSTOP_ENABLE
+        if [ -f /usr/local/bin/valheim-server ] && grep -q 'DOORSTOP_ENABLE' /usr/local/bin/valheim-server 2>/dev/null && ! grep -q 'DOORSTOP_ENABLED' /usr/local/bin/valheim-server 2>/dev/null; then
+          sed -i '/DOORSTOP_ENABLE=/a \    export DOORSTOP_ENABLED=1\n    export DOORSTOP_TARGET_ASSEMBLY="/opt/valheim/bepinex/BepInEx/core/BepInEx.Preloader.dll"' /usr/local/bin/valheim-server 2>/dev/null || true
           NEEDS_RESTART=1
         fi
 
@@ -335,8 +409,25 @@ class DockerController {
           touch /opt/valheim/dl/bepinex/merge
           export DEBUG_REINSTALL_BEPINEX=true
           /usr/local/bin/bepinex-updater || true
+          # Fallback direct download if bepinex-updater did not populate BepInEx.Preloader.dll
+          if [ ! -f /opt/valheim/dl/bepinex/BepInEx/core/BepInEx.Preloader.dll ] && [ ! -f /opt/valheim/bepinex/BepInEx/core/BepInEx.Preloader.dll ]; then
+            echo "Fallback: downloading BepInExPack_Valheim directly from Thunderstore..."
+            curl -fsSL "https://thunderstore.io/package/download/denikson/BepInExPack_Valheim/5.4.2360/" -o /tmp/bepinex_pack.zip 2>/dev/null || true
+            if [ -f /tmp/bepinex_pack.zip ]; then
+              mkdir -p /tmp/bepinex_extract /opt/valheim/dl/bepinex
+              unzip -qo /tmp/bepinex_pack.zip -d /tmp/bepinex_extract 2>/dev/null || true
+              if [ -d /tmp/bepinex_extract/BepInExPack_Valheim ]; then
+                cp -rf /tmp/bepinex_extract/BepInExPack_Valheim/* /opt/valheim/dl/bepinex/ 2>/dev/null || true
+                touch /opt/valheim/dl/bepinex/merge
+              fi
+              rm -rf /tmp/bepinex_pack.zip /tmp/bepinex_extract 2>/dev/null || true
+            fi
+          fi
           NEEDS_RESTART=1
         fi
+
+        # Ensure unstripped_corlib directory exists so legacy lloesche startup checks pass with BepInEx 5.4.2360+
+        mkdir -p /opt/valheim/dl/bepinex/unstripped_corlib /opt/valheim/bepinex/unstripped_corlib 2>/dev/null || true
 
         # Merge /opt/valheim/server and /opt/valheim/dl/bepinex into /opt/valheim/bepinex BEFORE installing plugins
         # so lloesche/valheim-server's startup rsync --delete never wipes out our plugins!
@@ -387,11 +478,11 @@ class DockerController {
           fi
         done
 
-        # If vanilla valheim_server (without BepInEx) is running or live_map.json is missing/outdated, schedule restart
+        # If vanilla valheim_server (without BepInEx) is running or live_map.json/world_terrain.json is missing/outdated, schedule restart
         if pgrep -f "/opt/valheim/server/valheim_server" >/dev/null 2>&1; then
           NEEDS_RESTART=1
         fi
-        if ! grep -q '"pluginVersion": "1.6.0"' /config/watchtower/live_map.json 2>/dev/null; then
+        if ! grep -q '"pluginVersion": "1.7.0"' /config/watchtower/live_map.json 2>/dev/null || [ ! -f /config/watchtower/world_terrain.json ]; then
           NEEDS_RESTART=1
         fi
 
@@ -410,7 +501,7 @@ class DockerController {
           cat << 'EOF_MAP' > /config/watchtower/live_map.json
 {
   "pluginStatus": "configuring_and_restarting_server",
-  "pluginVersion": "1.6.0",
+  "pluginVersion": "bootstrap",
   "worldName": "${worldNameSafe}",
   "lastUpdated": "${timestamp}",
   "timestamp": "${timestamp}",
@@ -438,7 +529,7 @@ EOF_MAP
             JSON.stringify(
               {
                 pluginStatus: 'configuring_and_restarting_server',
-                pluginVersion: '1.6.0',
+                pluginVersion: 'bootstrap',
                 worldName: this.configManager.state.serverMeta.worldName || 'Dedicated',
                 lastUpdated: timestamp,
                 timestamp,
@@ -773,22 +864,33 @@ EOF_MAP
       }, 5000);
     };
 
-    const tailCount = isReconnect ? 40 : 400;
+    // 2. Fetch recent tail deterministically as historical (only on initial attach, never on reconnect)
+    if (!isReconnect) {
+      try {
+        const tailRaw = await this.dockerRequest(
+          'GET',
+          `/containers/${this.containerId}/logs?stdout=true&stderr=true&follow=false&tail=300`,
+          null,
+          8000
+        );
+        if (typeof tailRaw === 'string' && tailRaw) {
+          for (const line of tailRaw.split(/\r?\n/)) {
+            this.logParser.processLine(line, { isHistorical: true });
+          }
+          this.configManager.saveState();
+        }
+      } catch (_) {}
+    }
 
-    // 2. Attach to Docker stdout/stderr stream with automatic error handling & reconnection
+    // 3. Attach to live Docker stdout/stderr stream (tail=0 so old lines are never replayed as live events)
     const req = http.request(
       {
         socketPath: DOCKER_SOCKET,
-        path: `/containers/${this.containerId}/logs?stdout=true&stderr=true&follow=true&tail=${tailCount}`,
+        path: `/containers/${this.containerId}/logs?stdout=true&stderr=true&follow=true&tail=0`,
         method: 'GET'
       },
       (res) => {
         let leftover = '';
-        let initialBatch = true;
-        const batchTimer = setTimeout(() => {
-          initialBatch = false;
-          this.configManager.saveState();
-        }, 3000);
 
         res.on('data', (chunk) => {
           leftover += chunk.toString('utf8');
@@ -798,22 +900,19 @@ EOF_MAP
           const lines = leftover.split(/\r?\n/);
           leftover = lines.pop() || '';
           for (const line of lines) {
-            this.logParser.processLine(line, { isHistorical: initialBatch });
+            this.logParser.processLine(line, { isHistorical: false });
           }
         });
 
         res.on('error', () => {
-          clearTimeout(batchTimer);
           scheduleReconnect();
         });
 
         res.on('end', () => {
-          clearTimeout(batchTimer);
           scheduleReconnect();
         });
 
         res.on('close', () => {
-          clearTimeout(batchTimer);
           scheduleReconnect();
         });
       }

@@ -26,13 +26,16 @@ class ValheimLogParser {
     if (!cleanLine) return;
 
     // Extract timestamp if present (MM/DD/YYYY HH:MM:SS:)
-    let timestamp = new Date().toISOString();
+    const liveNowIso = new Date().toISOString();
+    let timestamp = liveNowIso;
     const tsMatch = cleanLine.match(/^(\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}:\d{2})\s*:\s*(.*)$/);
     let body = cleanLine;
     if (tsMatch) {
-      const parsedDate = new Date(tsMatch[1]);
-      if (!isNaN(parsedDate.getTime())) {
-        timestamp = parsedDate.toISOString();
+      if (isHistorical) {
+        const parsedDate = new Date(tsMatch[1]);
+        if (!isNaN(parsedDate.getTime())) {
+          timestamp = parsedDate.toISOString();
+        }
       }
       body = tsMatch[2];
     }
@@ -109,10 +112,15 @@ class ValheimLogParser {
       }
 
       player.name = playerName;
-      player.lastSeen = timestamp;
+      player.lastSeen = isHistorical ? timestamp : liveNowIso;
       player.lastZdoId = zdoId;
 
       if (isHistorical) {
+        if (zdoId !== '0:0' && !player.online) {
+          player.online = true;
+          player.currentSessionStart = player.currentSessionStart || timestamp;
+          player.sessionsCount = Math.max(1, player.sessionsCount || 0);
+        }
         return;
       }
 
@@ -124,7 +132,7 @@ class ValheimLogParser {
         }
         this.addEvent({
           type: 'death',
-          timestamp,
+          timestamp: liveNowIso,
           player: playerName,
           steamId: player.steamId,
           title: `${playerName} met their end in battle`,
@@ -144,11 +152,11 @@ class ValheimLogParser {
       } else if (!player.online) {
         // Player joined!
         player.online = true;
-        player.currentSessionStart = timestamp;
+        player.currentSessionStart = liveNowIso;
         player.sessionsCount = (player.sessionsCount || 0) + 1;
         this.addEvent({
           type: 'join',
-          timestamp,
+          timestamp: liveNowIso,
           player: playerName,
           steamId: player.steamId,
           title: `${playerName} joined the server`,
@@ -171,47 +179,47 @@ class ValheimLogParser {
     }
 
     // 3. Player Disconnects
-    // Pattern A: Authoritative Valheim ZDO teardown with SteamID64:
-    const zdoDestroyMatch = body.match(/Destroying abandoned non persistent zdo\s+(-?\d+:\d+)\s+owner\s+(\d{15,20})/i);
+    // Pattern A: Authoritative Valheim character ZDO teardown:
+    const zdoDestroyMatch = body.match(/Destroying abandoned non persistent zdo\s+(-?\d+:\d+)\s+owner\s+(-?\d+)/i);
     if (zdoDestroyMatch) {
-      const ownerSteamId = zdoDestroyMatch[2];
-      if (this.finalizePlayerDisconnect(ownerSteamId, timestamp, { isHistorical })) {
-        stateChanged = true;
+      const destroyedZdoId = zdoDestroyMatch[1].trim();
+      const ownerId = zdoDestroyMatch[2].trim();
+      // Match against the player's actual character ZDOID (lastZdoId) so non-persistent VFX/projectile ZDOs never falsely disconnect an online player
+      const matchedByCharZdo = Object.values(this.state.players).find(
+        (p) => p && p.online && p.lastZdoId && p.lastZdoId !== '0:0' && p.lastZdoId === destroyedZdoId
+      );
+      if (matchedByCharZdo) {
+        if (this.finalizePlayerDisconnect(matchedByCharZdo.steamId, timestamp, { isHistorical })) {
+          stateChanged = true;
+        }
+      } else if (/^\d{15,20}$/.test(ownerId)) {
+        const ownerRecord = this.state.players[ownerId];
+        if (ownerRecord && ownerRecord.online && (!ownerRecord.lastZdoId || ownerRecord.lastZdoId === '0:0')) {
+          if (this.finalizePlayerDisconnect(ownerId, timestamp, { isHistorical })) {
+            stateChanged = true;
+          }
+        }
       }
     }
 
-    // Pattern B: Closing socket
-    const closeSocketMatch = body.match(/Closing socket\s+(\d+)/i);
+    // Pattern B: Closing socket (ignore "Closing socket 0" which is logged for unauthenticated probes / status checks)
+    const closeSocketMatch = body.match(/Closing socket\s+([^\s]+)/i);
     if (closeSocketMatch) {
-      const sock = closeSocketMatch[1];
-      if (sock.length >= 15) {
+      const sock = closeSocketMatch[1].trim();
+      if (sock !== '0' && (sock.length >= 15 || this.state.players[sock])) {
         if (this.finalizePlayerDisconnect(sock, timestamp, { isHistorical })) {
           stateChanged = true;
         }
-      } else {
-        const onlineList = Object.values(this.state.players).filter((p) => p.online);
-        if (onlineList.length === 1) {
-          if (this.finalizePlayerDisconnect(onlineList[0].steamId, timestamp, { isHistorical })) {
-            stateChanged = true;
-          }
-        }
       }
     }
 
-    // Pattern C: Disconnecting client
-    const disconnectClientMatch = body.match(/Disconnecting client\s+(\d+)/i);
+    // Pattern C: Disconnecting client (ignore "Disconnecting client 0")
+    const disconnectClientMatch = body.match(/Disconnecting client\s+([^\s]+)/i);
     if (disconnectClientMatch) {
-      const targetId = disconnectClientMatch[1];
-      if (targetId.length >= 15) {
+      const targetId = disconnectClientMatch[1].trim();
+      if (targetId !== '0' && (targetId.length >= 15 || this.state.players[targetId])) {
         if (this.finalizePlayerDisconnect(targetId, timestamp, { isHistorical })) {
           stateChanged = true;
-        }
-      } else {
-        const onlineList = Object.values(this.state.players).filter((p) => p.online);
-        if (onlineList.length === 1) {
-          if (this.finalizePlayerDisconnect(onlineList[0].steamId, timestamp, { isHistorical })) {
-            stateChanged = true;
-          }
         }
       }
     }
@@ -224,14 +232,12 @@ class ValheimLogParser {
       }
     }
 
-    // Pattern E: Server startup / restart markers (reset all stale sessions from previous runs)
+    // Pattern E: True server process boot markers (reset stale sessions from previous runs, never on mid-game Steam/PlayFab refresh)
     if (
-      body.match(/Game server connected/i) ||
-      body.match(/Server ID:\s*\d+/i) ||
       body.match(/Valheim version:?\s*[0-9.]+/i) ||
-      body.match(/Server registered with join code/i)
+      body.match(/Starting Valheim server/i)
     ) {
-      if (this.finalizeAllSessions(timestamp)) {
+      if (this.finalizeAllSessions(timestamp, { isHistorical })) {
         stateChanged = true;
       }
     }
@@ -484,16 +490,20 @@ class ValheimLogParser {
       return true;
     } else {
       target.currentSessionStart = null;
-      target.lastSeen = timestamp;
       return false;
     }
   }
 
-  finalizeAllSessions(timestamp) {
+  finalizeAllSessions(timestamp, { isHistorical = false } = {}) {
     let changed = false;
     for (const p of Object.values(this.state.players)) {
       if (p.online) {
-        this.configManager.finalizePlayerSession(p, timestamp);
+        if (isHistorical) {
+          p.online = false;
+          p.currentSessionStart = null;
+        } else {
+          this.configManager.finalizePlayerSession(p, timestamp);
+        }
         changed = true;
       }
     }

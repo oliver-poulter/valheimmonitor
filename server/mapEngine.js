@@ -62,6 +62,16 @@ class ValheimMapEngine {
       const b64Biomes = raw && (raw.biomesBase64 || raw.biomesB64);
       const b64Heights = raw && (raw.heightsBase64 || raw.heightsB64);
       if (raw && b64Biomes && b64Heights) {
+        if (raw.worldName && raw.worldName !== 'Dedicated') {
+          this.mapState.worldName = raw.worldName;
+          this.configManager.state.serverMeta.worldName = raw.worldName;
+        }
+        if (raw.seedName) {
+          this.mapState.seedName = raw.seedName;
+        }
+        if (typeof raw.seedNumeric === 'number' && raw.seedNumeric !== 0) {
+          this.mapState.seedNumeric = raw.seedNumeric;
+        }
         const gridRes = raw.gridSize || raw.resolution || 200;
         this.mapState.terrainGrid = {
           gridSize: gridRes,
@@ -350,17 +360,29 @@ class ValheimMapEngine {
     this.mapState.bepinexTelemetryActive = true;
     this.mapState.lastUpdated = new Date().toISOString();
 
-    if (payload.worldName) this.mapState.worldName = payload.worldName;
+    if (payload.worldName && payload.worldName !== 'Dedicated') {
+      this.mapState.worldName = payload.worldName;
+      this.configManager.state.serverMeta.worldName = payload.worldName;
+    } else if (payload.worldName && !this.mapState.worldName) {
+      this.mapState.worldName = payload.worldName;
+    }
     if (payload.seedName) this.mapState.seedName = payload.seedName;
+    if (typeof payload.seedNumeric === 'number' && payload.seedNumeric !== 0) {
+      this.mapState.seedNumeric = payload.seedNumeric;
+    }
     if (Array.isArray(payload.discoveredZones)) {
       this.mapState.discoveredZones = payload.discoveredZones;
     }
     if (Array.isArray(payload.players)) {
       const nextLive = {};
-      const activeIds = new Set(payload.players.map((p) => String(p.steamId || '').trim()).filter(Boolean));
-      const activeNames = new Set(payload.players.map((p) => String(p.name || '').toLowerCase().trim()).filter(Boolean));
+      const nowStr = new Date().toISOString();
+      const payloadTs = payload.lastUpdated || payload.timestamp;
+      const payloadAgeMs = payloadTs ? Date.now() - new Date(payloadTs).getTime() : 0;
+      const isFreshTelemetry = !Number.isNaN(payloadAgeMs) && payloadAgeMs < 15000;
 
       const knownPlayers = this.configManager.state.players || {};
+      let stateReconciled = false;
+
       for (const p of payload.players) {
         let key = p.steamId || p.name;
         if (p.name && !knownPlayers[key]) {
@@ -382,13 +404,13 @@ class ValheimMapEngine {
         const hasGps = p.hasGps !== false && (px !== 0 || pz !== 0 || py > 1);
         const pDist = Math.hypot(px, pz);
         let resolvedBiome = p.biome || this.estimateBiome(px, pz);
-        if (hasGps) {
+        if (hasGps && !p.biome) {
           if (pDist < 600) {
             resolvedBiome = 'Meadows';
           } else if (pDist < 1000 && resolvedBiome.includes('Mountain')) {
             resolvedBiome = 'Black Forest';
           }
-        } else {
+        } else if (!hasGps) {
           resolvedBiome = 'Awaiting GPS Signal';
         }
 
@@ -414,30 +436,58 @@ class ValheimMapEngine {
         if (hasGps) {
           this.recordExplorationPoint(px, pz, p.name || 'Viking');
         }
+
+        // If fresh active telemetry reports a player in-world, ensure they are marked online in state.players
+        if (payload.pluginStatus === 'active' && isFreshTelemetry && p.name && p.name !== 'Viking') {
+          let pRec = knownPlayers[key];
+          if (!pRec) {
+            pRec = {
+              steamId: key,
+              name: p.name,
+              online: true,
+              currentSessionStart: nowStr,
+              firstSeen: nowStr,
+              lastSeen: nowStr,
+              totalPlaytimeSeconds: 0,
+              sessionsCount: 1,
+              deathsCount: 0,
+              avatarHue: Math.abs(
+                String(p.name)
+                  .split('')
+                  .reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0)
+              ) % 360
+            };
+            knownPlayers[key] = pRec;
+            stateReconciled = true;
+          } else if (!pRec.online) {
+            pRec.online = true;
+            pRec.currentSessionStart = pRec.currentSessionStart || nowStr;
+            pRec.lastSeen = nowStr;
+            pRec.sessionsCount = Math.max(1, pRec.sessionsCount || 0);
+            stateReconciled = true;
+          } else {
+            pRec.lastSeen = nowStr;
+          }
+        }
+      }
+
+      if (stateReconciled) {
+        this.configManager.saveState();
       }
 
       if (payload.pluginStatus === 'active') {
-        this.mapState.livePlayers = nextLive;
-
-        // Reconcile with configManager.state.players:
-        // ONLY reconcile if BepInEx plugin telemetry is actively running in-world!
-        let reconciled = false;
-        const nowStr = new Date().toISOString();
-        for (const [key, playerRecord] of Object.entries(this.configManager.state.players)) {
-          if (playerRecord && playerRecord.online) {
-            const isPresent =
-              activeIds.has(playerRecord.steamId) ||
-              activeIds.has(key) ||
-              activeNames.has(String(playerRecord.name || '').toLowerCase());
-            if (!isPresent) {
-              this.configManager.finalizePlayerSession(playerRecord, nowStr);
-              reconciled = true;
+        // Preserve any online player who has valid GPS in this.mapState.livePlayers if payload temporarily omitted them
+        for (const [k, pRec] of Object.entries(knownPlayers)) {
+          if (pRec && pRec.online && !nextLive[k]) {
+            const byName = Object.values(nextLive).find(
+              (lp) => lp.name && pRec.name && lp.name.toLowerCase() === pRec.name.toLowerCase()
+            );
+            if (!byName && this.mapState.livePlayers[k] && this.mapState.livePlayers[k].hasGps) {
+              nextLive[k] = this.mapState.livePlayers[k];
             }
           }
         }
-        if (reconciled) {
-          this.configManager.saveState();
-        }
+        this.mapState.livePlayers = nextLive;
       } else {
         // If BepInEx is still booting/loading world save, preserve existing online players
         this.mapState.livePlayers = { ...this.mapState.livePlayers, ...nextLive };
