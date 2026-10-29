@@ -49,7 +49,7 @@ namespace HeimdallWatchtower
 
         private bool _terrainExported;
         private int _terrainRow;
-        private const int GridSize = 200;
+        private const int GridSize = 1024;
         private const float WorldRadius = 10500f;
         private byte[] _biomeBytes;
         private byte[] _heightBytes;
@@ -211,7 +211,7 @@ namespace HeimdallWatchtower
                 {
                     try
                     {
-                        StepTerrainExport(isMainThread ? 16 : 50);
+                        StepTerrainExport(isMainThread ? 32 : 128);
                     }
                     catch
                     {
@@ -487,7 +487,7 @@ namespace HeimdallWatchtower
             }
         }
 
-        private void StepTerrainExport(int rowsToProcess = 16)
+        private void StepTerrainExport(int rowsToProcess = 32)
         {
             ResolveTypes();
             if (_worldGenType == null || _znetType == null) return;
@@ -559,7 +559,7 @@ namespace HeimdallWatchtower
             {
                 _terrainExported = true;
 
-                var sb = new StringBuilder(131072);
+                var sb = new StringBuilder(3200000);
                 sb.Append("{\n");
                 sb.AppendFormat("  \"worldName\": \"{0}\",\n", EscapeJson(worldName));
                 sb.AppendFormat("  \"seedName\": \"{0}\",\n", EscapeJson(seedName));

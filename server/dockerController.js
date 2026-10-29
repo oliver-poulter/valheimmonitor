@@ -251,7 +251,7 @@ class DockerController {
       if (!needsTerrainSync && this.terrainSyncPollCount % 6 === 1) {
         try {
           const localTerrain = fs.readFileSync(terrainPath, 'utf8');
-          if (!localTerrain.includes('"seedNumeric"')) {
+          if (!localTerrain.includes('"seedNumeric"') || !localTerrain.includes('"gridSize": 1024')) {
             needsTerrainSync = true;
           }
         } catch (_) {

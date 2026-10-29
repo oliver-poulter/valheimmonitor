@@ -2418,7 +2418,7 @@ function renderLiveMapAndVitals() {
 /* --------------------------------------------------------------------------
    PROCEDURAL VALHEIM CARTOGRAPHY GENERATOR
    -------------------------------------------------------------------------- */
-const TERRAIN_RES = 600;
+const TERRAIN_RES = 1024;
 let cachedTerrainCanvas = null;
 let cachedTerrainSeed = null;
 let cachedBiomeLookup = null;
